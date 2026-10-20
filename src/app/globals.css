@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #0b0c0f;
+  --color-panel: #13151a;
+  --color-line: #23262e;
+  --color-muted: #8b90a0;
+  --color-brand: #f5c451;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-serif), ui-serif, Georgia, serif;
+}
+
+html,
+body {
+  background: var(--color-ink);
+  color: #eef0f4;
+}
+
+::selection {
+  background: var(--color-brand);
+  color: #111;
+}
+
+/* Slim editor-style sliders: filled track up to the thumb. */
+.slider {
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--color-brand) var(--pct, 50%), rgb(255 255 255 / 0.12) var(--pct, 50%));
+  cursor: pointer;
+}
+.slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 0 3px rgb(0 0 0 / 0.35);
+  transition: transform 0.12s;
+}
+.slider:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+.slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  background: #fff;
+}
+input[type="range"]:not(.slider) {
+  accent-color: var(--color-brand);
+}
+
+.timeline-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.18) transparent;
+}
+
+select {
+  color-scheme: dark;
+}
