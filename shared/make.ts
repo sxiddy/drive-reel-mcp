@@ -45,6 +45,8 @@ export type MakeStatus = {
   auto?: boolean;
   chosen?: string;
   result?: { videoId: string; editKey?: string; durationSeconds: number };
+  /** The downloaded footage was deleted to save disk; the published video keeps its own copy. */
+  footageCleared?: boolean;
 };
 
 /** Website project ids are long random strings: knowing one is what lets you see and steer it. */

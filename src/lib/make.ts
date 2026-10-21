@@ -19,6 +19,43 @@ export function makeDir(id: string) {
   return path.join(PROJECTS, id);
 }
 
+/** How long finished footage stays, so the visitor can still try another theme. */
+const KEEP_FOOTAGE_MS = 60 * 60_000;
+/** Themes nobody picked from in a day are abandoned. */
+const KEEP_UNCHOSEN_MS = 24 * 60 * 60_000;
+/** Downloads and working copies; everything else in a project dir is a few KB. */
+const FOOTAGE_DIRS = ["source", "assets"];
+
+/**
+ * Frees disk: deletes the downloaded footage of website jobs that finished (or failed) over an hour
+ * ago, or that sat on the theme picker for a day. The published video lives in data/videos with its own assets, so watching and editing keep working.
+ */
+export function sweepFootage(now = Date.now()) {
+  if (!fs.existsSync(PROJECTS)) return;
+  for (const id of fs.readdirSync(PROJECTS)) {
+    if (!isMakeId(id)) continue;
+    const dir = makeDir(id);
+    const s = readStatus(dir);
+    if (!s || s.footageCleared) continue;
+    const keep = s.step === "done" || s.step === "error" ? KEEP_FOOTAGE_MS : s.step === "choose" ? KEEP_UNCHOSEN_MS : null;
+    if (keep === null || now - Date.parse(s.updatedAt) < keep) continue;
+    for (const d of FOOTAGE_DIRS) fs.rmSync(path.join(dir, d), { recursive: true, force: true });
+    writeStatus(dir, { ...s, footageCleared: true });
+  }
+}
+
+const g = globalThis as { __footageSweep?: NodeJS.Timeout };
+if (!g.__footageSweep) {
+  g.__footageSweep = setInterval(() => {
+    try {
+      sweepFootage();
+    } catch (e) {
+      console.error("footage sweep failed", e);
+    }
+  }, 10 * 60_000);
+  g.__footageSweep.unref();
+}
+
 const RUNNING_STEPS: MakeStatus["step"][] = ["queued", "analyzing", "themes", "rendering"];
 const isRunning = (s: MakeStatus) => RUNNING_STEPS.includes(s.step);
 
@@ -81,6 +118,11 @@ export class MakeError extends Error {
 
 /** Starts analysing a Drive folder. `auto` renders Claude's first theme straight away ("Just make it"). */
 export function startMake(input: { source: string; occasion: string; duration: number; auto: boolean }): MakeStatus {
+  try {
+    sweepFootage();
+  } catch (e) {
+    console.error("footage sweep failed", e);
+  }
   if (busy()) throw new MakeError("Drive Reel is busy making other videos. Try again in a few minutes.", 429);
   const id = `web-${crypto.randomBytes(12).toString("hex")}`;
   const dir = makeDir(id);
@@ -110,6 +152,7 @@ export function startGenerate(id: string, themeId: string): MakeStatus {
   const s = liveStatus(id);
   if (!s) throw new MakeError("not found", 404);
   if (s.step !== "choose" && s.step !== "done") throw new MakeError(s.step === "rendering" ? "A video is already being made." : "Themes aren't ready yet.", 409);
+  if (s.footageCleared) throw new MakeError("This footage was cleared to save space. Start a new video from the same link to try another cut.", 410);
   if (!s.themes?.some((t) => t.id === themeId)) throw new MakeError("Unknown theme.", 400);
   if (busy()) throw new MakeError("Drive Reel is busy making other videos. Try again in a few minutes.", 429);
   const next: MakeStatus = { ...s, step: "rendering", chosen: themeId, stage: "Starting", progress: 0, error: undefined, result: undefined };

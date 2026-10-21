@@ -493,7 +493,7 @@ function Rendering({ id, s, chosen }: { id: string; s: MakeStatus; chosen?: Make
   const total = s.input.duration * 24;
   const p = `${Math.round(s.progress * 1000) / 10}%`;
   const src = chosen?.preview ? `/api/make/${id}/preview/${chosen.id}` : null;
-  const others = s.themes?.filter((t) => t.id !== s.chosen) ?? [];
+  const others = s.footageCleared ? [] : (s.themes?.filter((t) => t.id !== s.chosen) ?? []);
   return (
     <section className="mt-10">
       <div className="grid gap-8 lg:grid-cols-12 lg:gap-6">
