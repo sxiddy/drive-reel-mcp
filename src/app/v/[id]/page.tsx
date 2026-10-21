@@ -164,6 +164,9 @@ export default async function Watch({ params, searchParams }: Props) {
               <p className="mt-3 font-mono text-label uppercase tracking-[.08em] text-fg-2 tnum">
                 {plan.themeName} · {STYLES[plan.styleId].name} · {aspect} · {tc(version.durationSeconds)} · {plan.scenes.length} shots · Take {version.n}
               </p>
+              {plan.music?.credit && plan.music.credit !== "Generated soundtrack" ? (
+                <p className="mt-2 whitespace-pre-line text-caption text-fg-3">Music: {plan.music.credit}</p>
+              ) : null}
               {meta.pitch ? <p className="mt-5 max-w-[62ch] font-serif text-prose text-fg">{meta.pitch}</p> : null}
 
               <div className="mt-6 flex flex-wrap items-center gap-2">

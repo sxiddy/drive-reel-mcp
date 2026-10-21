@@ -31,6 +31,34 @@ export function CreateForm() {
   const [checked, setChecked] = useState(""); // the link value validation has caught up with
   const [duration, setDuration] = useState(30);
   const [occasion, setOccasion] = useState("");
+  // Optional, but they make the title and end card read like a real event ("VinHack 2026 · VIT Vellore").
+  const [eventName, setEventName] = useState("");
+  const [place, setPlace] = useState("");
+  // An uploaded song means "our own song"; without one the library is used (a song in the folder still counts).
+  const [song, setSong] = useState<{ id: string; name: string; url: string; duration?: number; bpm?: number } | null>(null);
+  const [songBusy, setSongBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
+  function removeSong() {
+    if (song) URL.revokeObjectURL(song.url);
+    setSong(null);
+  }
+
+  async function uploadSong(file: File) {
+    setError(null);
+    if (file.size > 40 * 1024 * 1024) return setError("Songs can be up to 40 MB.");
+    setSongBusy(true);
+    try {
+      const res = await fetch("/api/make/song", { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j.error ?? `Upload failed (${res.status}).`);
+      setSong({ id: j.songId, name: file.name, url: URL.createObjectURL(file), duration: j.duration, bpm: j.bpm });
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSongBusy(false);
+    }
+  }
   const [sweep, setSweep] = useState(0);
   const [busy, setBusy] = useState<null | "themes" | "auto">(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +84,7 @@ export function CreateForm() {
       const res = await fetch("/api/make", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ link: link.trim(), duration, occasion: occasion.trim(), auto }),
+        body: JSON.stringify({ link: link.trim(), duration, occasion: occasion.trim(), eventName: eventName.trim() || undefined, place: place.trim() || undefined, music: song ? "own" : "library", songId: song?.id, auto }),
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.error ?? `Something went wrong (${res.status}).`);
@@ -207,6 +235,93 @@ export function CreateForm() {
                 );
               })}
             </div>
+          </div>
+        </div>
+
+
+        <div className={row}>
+          <label htmlFor="eventName" className="pt-3.5">
+            <Label as="span" className="text-fg-3">Event name · optional</Label>
+          </label>
+          <div>
+            <div className="flex h-12 items-center rounded-xs border border-edge bg-surface px-3 focus-within:border-fg focus-within:shadow-[0_0_0_1px_var(--color-fg)]">
+              <input
+                id="eventName"
+                value={eventName}
+                onChange={(e) => setEventName(e.target.value.slice(0, 60))}
+                placeholder="e.g. VinHack 2026"
+                className="h-full w-full min-w-0 bg-transparent text-body outline-none placeholder:text-fg-3"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className={row}>
+          <label htmlFor="place" className="pt-3.5">
+            <Label as="span" className="text-fg-3">Place · optional</Label>
+          </label>
+          <div>
+            <div className="flex h-12 items-center rounded-xs border border-edge bg-surface px-3 focus-within:border-fg focus-within:shadow-[0_0_0_1px_var(--color-fg)]">
+              <input
+                id="place"
+                value={place}
+                onChange={(e) => setPlace(e.target.value.slice(0, 60))}
+                placeholder="e.g. VIT Vellore"
+                className="h-full w-full min-w-0 bg-transparent text-body outline-none placeholder:text-fg-3"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className={row}>
+          <Label as="span" className="pt-3.5 text-fg-3">Music · optional</Label>
+          <div>
+            {song ? (
+              <div className="flex items-center gap-3 rounded-xs border border-edge bg-surface px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-body text-fg">{song.name}</p>
+                  <p className="font-mono text-caption text-fg-3 tnum">
+                    {song.duration ? `${Math.floor(song.duration / 60)}:${String(Math.round(song.duration % 60)).padStart(2, "0")}` : "–"}
+                    {song.bpm ? ` · ${song.bpm} BPM` : ""}
+                  </p>
+                </div>
+                <audio src={song.url} controls preload="none" className="h-8 w-40 shrink-0" />
+                <button type="button" aria-label="Remove song" onClick={removeSong} className={btn("secondary", "sm", "shrink-0")}>
+                  ×
+                </button>
+              </div>
+            ) : (
+              <div
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDragging(true);
+                }}
+                onDragLeave={() => setDragging(false)}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  setDragging(false);
+                  const f = e.dataTransfer.files?.[0];
+                  if (f) uploadSong(f);
+                }}
+                className={`flex flex-col items-center justify-center gap-2 rounded-xs border border-dashed px-4 py-6 text-center ${dragging ? "border-fg bg-well" : "border-edge bg-surface"}`}
+              >
+                {songBusy ? (
+                  <span className="text-small text-fg-2">
+                    <Tally /> Uploading and finding the beat…
+                  </span>
+                ) : (
+                  <>
+                    <span className="text-small text-fg-2">Drop your song here (MP3, WAV, M4A, AAC or OGG, up to 40 MB)</span>
+                    <label className={btn("secondary", "sm", "cursor-pointer")}>
+                      Choose file
+                      <input type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,audio/*" className="sr-only" onChange={(e) => e.target.files?.[0] && uploadSong(e.target.files[0])} />
+                    </label>
+                    <span className="text-caption text-fg-3">No song? We&apos;ll pick one from the royalty-free library (or use an audio file in your Drive folder).</span>
+                  </>
+                )}
+              </div>
+            )}
+            <p className="mt-2 text-caption text-fg-3">Instagram or YouTube may mute or claim videos with copyrighted songs.</p>
           </div>
         </div>
 

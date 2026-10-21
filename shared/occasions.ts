@@ -59,8 +59,8 @@ const PROFILES: (OccasionProfile & { match: RegExp })[] = [
   },
   {
     id: "graduation",
-    match: /graduat|convocation|farewell|reunion|batch of|class of|alumni|college fest|fest\b/i,
-    label: "a graduation, farewell or college fest",
+    match: /graduat|convocation|farewell|reunion|batch of|class of|alumni/i,
+    label: "a graduation, farewell or reunion",
     styles: ["nostalgic", "cinematic", "hype"],
     avoid: [],
     tone: "Bittersweet pride; friends, the stage moment, the last group photo.",
@@ -77,7 +77,7 @@ const PROFILES: (OccasionProfile & { match: RegExp })[] = [
   },
   {
     id: "party",
-    match: /party|concert|gig|festival|dj|rave|nightlife|new year|diwali|holi|christmas/i,
+    match: /party|concert|gig|festival|fest\b|dj|rave|nightlife|new year|diwali|holi|christmas/i,
     label: "a party, festival or concert",
     styles: ["neon", "hype", "playful"],
     avoid: ["clean"],

@@ -41,6 +41,8 @@ export type Probe = {
   codec?: string;
   /** Transfer characteristic, e.g. "arib-std-b67" (HLG) or "smpte2084" (PQ) for HDR phone footage. */
   colorTransfer?: string;
+  /** Container and video-stream tags (creation_time, com.apple.quicktime.creationdate, …). */
+  tags?: Record<string, string>;
 };
 
 export const isHdr = (p: Pick<Probe, "colorTransfer">) => p.colorTransfer === "arib-std-b67" || p.colorTransfer === "smpte2084";
@@ -48,8 +50,8 @@ export const isHdr = (p: Pick<Probe, "colorTransfer">) => p.colorTransfer === "a
 export async function probe(file: string): Promise<Probe> {
   const { stdout } = await run(FFPROBE, ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", file], { timeoutMs: 60_000 });
   const j = JSON.parse(stdout) as {
-    format?: { duration?: string };
-    streams?: { codec_type: string; codec_name?: string; color_transfer?: string; width?: number; height?: number; r_frame_rate?: string; duration?: string; tags?: { rotate?: string }; side_data_list?: { rotation?: number }[] }[];
+    format?: { duration?: string; tags?: Record<string, string> };
+    streams?: { codec_type: string; codec_name?: string; color_transfer?: string; width?: number; height?: number; r_frame_rate?: string; duration?: string; tags?: { rotate?: string } & Record<string, string>; side_data_list?: { rotation?: number }[] }[];
   };
   const v = j.streams?.find((s) => s.codec_type === "video");
   const a = j.streams?.find((s) => s.codec_type === "audio");
@@ -65,6 +67,7 @@ export async function probe(file: string): Promise<Probe> {
     hasAudio: !!a,
     codec: v?.codec_name,
     colorTransfer: v?.color_transfer,
+    tags: { ...(v?.tags ?? {}), ...(j.format?.tags ?? {}) },
   };
 }
 
@@ -81,22 +84,104 @@ const tonemap = (transfer: string) =>
  */
 export async function makeVideoProxy(src: string, out: string, opts: { hdrTransfer?: string; hasAudio: boolean; segments?: { start: number; length: number }[] }) {
   const vf = [opts.hdrTransfer ? tonemap(opts.hdrTransfer) : "", SCALE_1080, "fps=30", "format=yuv420p", "setsar=1"].filter(Boolean).join(",");
+  // Phone clips are often variable frame rate: force constant 30 fps and stretch/squeeze the audio to the
+  // timestamps, so picture and sound stay in sync and trims land where the analysis measured.
+  const sync = ["-fps_mode", "cfr", ...(opts.hasAudio ? ["-af", "aresample=async=1"] : [])];
   const enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", out];
   const segs = opts.segments ?? [];
   if (segs.length <= 1) {
     const cut = segs[0] ? ["-ss", String(segs[0].start), "-t", String(segs[0].length)] : [];
-    await ffmpeg([...cut, "-i", src, "-vf", vf, "-ac", "2", "-ar", "48000", ...enc]);
+    await ffmpeg([...cut, "-i", src, "-vf", vf, ...sync, "-ac", "2", "-ar", "48000", ...enc]);
     return;
   }
   const inputs = segs.flatMap((g) => ["-ss", String(g.start), "-t", String(g.length), "-i", src]);
-  const graph = segs.map((_, i) => `[${i}:v]${vf}[v${i}]` + (opts.hasAudio ? `;[${i}:a]aresample=48000,aformat=channel_layouts=stereo[a${i}]` : "")).join(";");
+  const graph = segs.map((_, i) => `[${i}:v]${vf}[v${i}]` + (opts.hasAudio ? `;[${i}:a]aresample=48000:async=1,aformat=channel_layouts=stereo[a${i}]` : "")).join(";");
   const join = segs.map((_, i) => `[v${i}]` + (opts.hasAudio ? `[a${i}]` : "")).join("");
   const concat = `${join}concat=n=${segs.length}:v=1:a=${opts.hasAudio ? 1 : 0}[v]${opts.hasAudio ? "[a]" : ""}`;
-  await ffmpeg([...inputs, "-filter_complex", `${graph};${concat}`, "-map", "[v]", ...(opts.hasAudio ? ["-map", "[a]"] : []), ...enc]);
+  await ffmpeg([...inputs, "-filter_complex", `${graph};${concat}`, "-map", "[v]", ...(opts.hasAudio ? ["-map", "[a]"] : []), "-fps_mode", "cfr", ...enc]);
 }
 
+/** Re-encodes a proxy turned `rotate` degrees clockwise (a phone clip filmed sideways without a rotation flag). */
+export async function rotateVideoProxy(file: string, rotate: 90 | 270) {
+  const tmp = file.replace(/\.mp4$/, ".rot.mp4");
+  await ffmpeg(["-i", file, "-vf", rotate === 90 ? "transpose=1" : "transpose=2", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-c:a", "copy", "-movflags", "+faststart", tmp]);
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * EXIF orientation (1–8) of a JPEG, read from its APP1 segment; 1 when absent or not a JPEG. Phones store
+ * portrait photos landscape and set this flag, so without it a portrait shot comes out sideways.
+ */
+export function exifOrientation(buf: Buffer): number {
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return 1;
+  let i = 2;
+  while (i + 4 <= buf.length && buf[i] === 0xff) {
+    const marker = buf[i + 1];
+    const len = buf.readUInt16BE(i + 2);
+    if (marker === 0xda) break; // start of scan: no more metadata
+    if (marker === 0xe1 && buf.toString("latin1", i + 4, i + 8) === "Exif" && buf[i + 8] === 0 && buf[i + 9] === 0) {
+      const t = i + 10;
+      const le = buf.toString("latin1", t, t + 2) === "II";
+      const u16 = (o: number) => (le ? buf.readUInt16LE(o) : buf.readUInt16BE(o));
+      const u32 = (o: number) => (le ? buf.readUInt32LE(o) : buf.readUInt32BE(o));
+      const ifd = t + u32(t + 4);
+      if (ifd + 2 > buf.length) return 1;
+      for (let k = 0, n = u16(ifd); k < n; k++) {
+        const e = ifd + 2 + k * 12;
+        if (e + 12 > buf.length) break;
+        if (u16(e) === 0x0112) {
+          const o = u16(e + 8);
+          return o >= 1 && o <= 8 ? o : 1;
+        }
+      }
+      return 1;
+    }
+    i += 2 + len;
+  }
+  return 1;
+}
+
+/** ffmpeg filters that turn an EXIF-oriented image upright. */
+export const ORIENT_FILTER: Record<number, string> = {
+  2: "hflip",
+  3: "hflip,vflip",
+  4: "vflip",
+  5: "transpose=0",
+  6: "transpose=1",
+  7: "transpose=3",
+  8: "transpose=2",
+};
+
+/** Upright, at most 2160 px wide JPEG. Orientation is applied explicitly (autorotation off) so it happens exactly once. */
 export async function makeImageProxy(src: string, out: string) {
-  await ffmpeg(["-i", src, "-vf", "scale='min(2160,iw)':-2", "-frames:v", "1", "-q:v", "3", out]);
+  let head: Buffer;
+  try {
+    const fd = fs.openSync(src, "r");
+    head = Buffer.alloc(256 * 1024);
+    const n = fs.readSync(fd, head, 0, head.length, 0);
+    fs.closeSync(fd);
+    head = head.subarray(0, n);
+  } catch {
+    head = Buffer.alloc(0);
+  }
+  const orient = ORIENT_FILTER[exifOrientation(head)];
+  const vf = [orient, "scale='min(2160,iw)':-2"].filter(Boolean).join(",");
+  await ffmpeg(["-noautorotate", "-i", src, "-vf", vf, "-frames:v", "1", "-q:v", "3", "-map_metadata", "-1", out]);
+}
+
+/**
+ * Exposure and sharpness of a still, measured like clip frames (640 px wide, same edge detector), so they
+ * compare with each other and with clips. luma 0..1; detail is edge density.
+ */
+export async function imageQuality(file: string): Promise<{ luma: number; detail: number }> {
+  const { stderr } = await ffmpeg([
+    "-i", file,
+    "-vf", "scale=640:-2,format=yuv420p,signalstats,metadata=print,format=gray,edgedetect=low=0.08:high=0.2,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
+    "-frames:v", "1", "-f", "null", "-",
+  ]);
+  const [s] = parseFrameStats(stderr);
+  if (!s) throw new Error("no stats for image");
+  return { luma: round3(colorOfFrame(s).luma), detail: Math.round(s.edges * 10) / 10 };
 }
 
 export async function makeAudioProxy(src: string, out: string) {
@@ -388,9 +473,9 @@ export async function contactSheet(file: string, duration: number, out: string, 
   ]);
 }
 
-/** 64-bit difference hash; near-identical photos (burst shots, re-uploads) differ in only a few bits. */
-export async function dHash(file: string, tmp: string): Promise<bigint> {
-  await ffmpeg(["-i", file, "-vf", "scale=9:8:flags=area,format=gray", "-frames:v", "1", "-f", "rawvideo", tmp]);
+/** 64-bit difference hash; near-identical photos (burst shots, re-uploads) differ in only a few bits. `at` seeks a video. */
+export async function dHash(file: string, tmp: string, at?: number): Promise<bigint> {
+  await ffmpeg([...(at !== undefined ? ["-ss", at.toFixed(2)] : []), "-i", file, "-vf", "scale=9:8:flags=area,format=gray", "-frames:v", "1", "-f", "rawvideo", tmp]);
   const px = fs.readFileSync(tmp);
   fs.rmSync(tmp, { force: true });
   let h = 0n;

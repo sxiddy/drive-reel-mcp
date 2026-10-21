@@ -6,6 +6,7 @@ import { STYLES, type StyleId } from "../shared/styles";
 import { musicFor } from "../shared/occasions";
 import { renderPlan } from "../render/render";
 import { synthesizeTrack, writeWav } from "./music";
+import { ffmpeg } from "./media";
 import { buildPlan, type Theme } from "./planner";
 import { loadAnalysis, loadProject, projectDir, saveProject } from "./projects";
 import { buildManifest, publishVideo, type Published } from "./publish";
@@ -87,6 +88,11 @@ export async function generateFromTheme(projectId: string, theme: Theme, duratio
     const rel = `assets/music-${theme.id}.wav`;
     writeWav(path.join(dir, rel), synthesizeTrack(musicFor(STYLES[theme.styleId], analysis.occasion), musicNeeded.seconds, theme.id.charCodeAt(1)));
     plan.music = { ...plan.music!, src: rel };
+  } else if (musicNeeded?.kind === "library") {
+    // The part of the library track this cut uses, as its own file (the plan's music starts at its 0).
+    update("Preparing the soundtrack", 0.05);
+    const rel = plan.music!.src;
+    await ffmpeg(["-ss", String(musicNeeded.start), "-t", String(musicNeeded.seconds), "-i", path.isAbsolute(musicNeeded.path) ? musicNeeded.path : path.join(dir, musicNeeded.path), "-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-ar", "48000", path.join(dir, rel)]);
   }
   const project = loadProject(projectId);
   return renderAndPublish({

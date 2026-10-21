@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { EditPlan, isSafeAssetPath, planDurationInFrames, resolveAsset, timelineSegments, transitionFrames, type VideoScene } from "../shared/plan";
 import { parseEmbeddedFolderView, parseSource, mediaKind } from "../mcp/drive";
-import { spreadPick } from "../mcp/analyze";
+import { duplicateClips, spreadPick } from "../mcp/analyze";
 import { buildPlan, cutTimes, type Theme } from "../mcp/planner";
 import { onsetEnvelope, tempoFromEnvelope } from "../mcp/beats";
 import { synthesizeTrack } from "../mcp/music";
@@ -12,8 +12,8 @@ import { musicFor, occasionProfile } from "../shared/occasions";
 import { parseRange } from "../render/static-server";
 import { demoPlan } from "../remotion/demo-plan";
 import type { Analysis, ClipInfo } from "../mcp/analyze";
-import { detectSpeech } from "../mcp/media";
-import { chopOf, folderColor, gradeToward } from "../mcp/planner";
+import { detectSpeech, exifOrientation, ORIENT_FILTER } from "../mcp/media";
+import { chopOf, folderColor, gradeToward, levelGainDb, photoQuality, PHOTO_MIN, shotLevel, spreadApart } from "../mcp/planner";
 import { isTranscriberAvailable, toCaptionCues } from "../mcp/transcribe";
 import { musicDuck, sceneVolume, speechTimeline, SPEECH_VOLUME } from "../remotion/audio";
 
@@ -120,14 +120,19 @@ test("planner follows Claude's curated shot order", () => {
   const { plan } = buildPlan(analysis, theme, { durationOverride: 12 });
   assert.equal(plan.scenes[0].kind === "video" && plan.scenes[0].src, "assets/v3.mp4");
   assert.equal(plan.scenes[0].caption, "Opening");
-  assert.equal(plan.scenes[1].kind, "image");
+  // Fillers may sit between them, but the curated shots keep their order and the closer stays last.
+  const photoAt = plan.scenes.findIndex((s) => s.kind === "image");
+  assert.ok(photoAt > 0, "the photo comes after the opener");
+  const last = plan.scenes.at(-1)!;
+  assert.equal(last.kind === "video" && last.src, "assets/v1.mp4");
 });
 
 for (const styleId of ["hype", "cinematic", "elegant"] as const) {
   test(`every cut lands on the music's beat (${styleId})`, () => {
     const theme: Theme = { id: "t1", name: "T", pitch: "a test pitch", story: "opens wide, peaks, closes", occasionFit: "fits a test event", styleId, title: "T", outroText: "Bye", shots: [{ id: "v1" }, { id: "p4" }, { id: "v3" }] };
     const { plan } = buildPlan(analysis, theme);
-    const beat = 60 / plan.music!.bpm;
+    // Energy styles cut on half beats.
+    const beat = 60 / plan.music!.bpm / (STYLES[styleId].prefer === "energy" ? 2 : 1);
     const cuts = cutTimes(plan, timelineSegments(plan), (a, b) => transitionFrames(plan, a, b));
     // All cuts except the last (into the outro, which absorbs the remainder) sit within one frame of a beat.
     for (const c of cuts.slice(0, -1)) {
@@ -144,8 +149,9 @@ test("a Drive song's detected tempo and first beat drive the grid", () => {
   assert.equal(plan.music!.bpm, 100);
   const cuts = cutTimes(plan, timelineSegments(plan), (a, b) => transitionFrames(plan, a, b));
   for (const c of cuts.slice(0, -1)) {
-    const k = (c - 0.3) / 0.6;
-    assert.ok(Math.abs(k - Math.round(k)) * 0.6 <= 1.01 / 30, `cut at ${c}s is off the shifted grid`);
+    // Hype cuts on half beats of the song's 0.6 s beat.
+    const k = (c - 0.3) / 0.3;
+    assert.ok(Math.abs(k - Math.round(k)) * 0.3 <= 1.01 / 30, `cut at ${c}s is off the shifted grid`);
   }
 });
 
@@ -262,7 +268,7 @@ for (const styleId of ["hype", "cinematic", "clean"] as const) {
     }
     // The guarantees the planner already made still hold.
     assert.ok(Math.abs(planDurationInFrames(plan) / plan.fps - 30) < 1);
-    const beat = 60 / plan.music!.bpm;
+    const beat = 60 / plan.music!.bpm / (STYLES[plan.styleId].prefer === "energy" ? 2 : 1);
     for (const c of cutTimes(plan, timelineSegments(plan), (a, b) => transitionFrames(plan, a, b)).slice(0, -1)) {
       assert.ok(Math.abs(c / beat - Math.round(c / beat)) * beat <= 1.01 / plan.fps, `cut at ${c.toFixed(3)}s is off the beat`);
     }
@@ -361,4 +367,128 @@ test("the occasion picks a profile that steers styles and music", () => {
   assert.equal(m.drums, "none");
   assert.ok(m.bpm < STYLES.hype.music.bpm);
   assert.deepEqual(musicFor(STYLES.hype, "VinHack 2026"), STYLES.hype.music);
+});
+
+// ----- Shot selection and timing ----------------------------------------------------------------------
+
+const hypeTheme = (shots?: Theme["shots"]): Theme => ({ id: "t1", name: "T", pitch: "a test pitch", story: "opens wide, peaks, closes", occasionFit: "fits a test event", styleId: "hype", title: "T", outroText: "Bye", shots: shots ?? [] });
+const videoScenes = (plan: EditPlan) => plan.scenes.filter((s): s is VideoScene => s.kind === "video");
+
+test("two shots of the same clip never play back to back when other footage exists", () => {
+  // One long clip dominates: story order alone would stack its shots together.
+  const a: Analysis = { ...analysis, clips: [fakeClip("v1", 60), fakeClip("v2", 8), fakeClip("v3", 8)], photos: [] };
+  for (const shots of [undefined, [{ id: "v1" }, { id: "v1" }, { id: "v2" }, { id: "v1" }]]) {
+    const { plan } = buildPlan(a, hypeTheme(shots), { durationOverride: 20 });
+    const srcs = plan.scenes.map((s) => (s.kind === "card" ? "" : s.src));
+    const v1 = srcs.filter((s) => s === "assets/v1.mp4").length;
+    const others = srcs.length - v1;
+    // Possible whenever the other clips can separate every v1 shot.
+    if (others >= v1 - 1) for (let i = 1; i < srcs.length; i++) assert.notEqual(srcs[i], srcs[i - 1], `scenes ${i} and ${i + 1} are both ${srcs[i]} (${shots ? "curated" : "auto"})`);
+  }
+  assert.deepEqual(spreadApart(["a", "a", "a", "b", "c"], (x) => x), ["a", "b", "a", "c", "a"]);
+  assert.deepEqual(spreadApart(["a", "a"], (x) => x), ["a", "a"], "nothing to interleave with");
+});
+
+test("shots of one clip never overlap or replay footage, even when stretched to fit", () => {
+  // Few, short-ish clips for a long video: the fit has to stretch shots.
+  const a: Analysis = { ...analysis, clips: [fakeClip("v1", 14), fakeClip("v2", 6)], photos: [] };
+  const { plan } = buildPlan(a, hypeTheme([{ id: "v1", start: 2 }, { id: "v1", start: 2.5 }, { id: "v2" }]), { durationOverride: 30 });
+  const bySrc = new Map<string, [number, number][]>();
+  for (const s of videoScenes(plan)) bySrc.set(s.src, [...(bySrc.get(s.src) ?? []), [s.trimStart, s.trimStart + s.duration]]);
+  for (const [src, spans] of bySrc) {
+    spans.sort((x, y) => x[0] - y[0]);
+    for (let i = 1; i < spans.length; i++) assert.ok(spans[i][0] >= spans[i - 1][1] - 1e-6, `${src}: ${JSON.stringify(spans[i - 1])} overlaps ${JSON.stringify(spans[i])}`);
+  }
+});
+
+test("no shot holds past twice the style's shot length; short footage gives a shorter video, not long shots", () => {
+  const style = STYLES.hype;
+  const limit = 2 * style.shotLength + style.transition.duration + 0.25;
+  // 3 small clips and a photo can't fill 40 s at Hype pace.
+  const a: Analysis = { ...analysis, clips: [fakeClip("v1", 4), fakeClip("v2", 4), fakeClip("v3", 5)] };
+  const { plan, notes } = buildPlan(a, hypeTheme(), { durationOverride: 40 });
+  // The opening shot also carries the title (at most 2.6 s of it) when the title is drawn over it.
+  const limitOf = (p: EditPlan, i: number) => limit + (p.opening && i === 0 ? 2.65 : 0);
+  plan.scenes.forEach((s, i) => assert.ok(s.duration <= limitOf(plan, i), `${s.id} holds ${s.duration}s`));
+  assert.ok(plan.outro.duration <= 1.8 + 1.2 + 0.01, `outro ${plan.outro.duration}s pads the missing footage`);
+  assert.ok(notes.some((n) => /only supports/.test(n)));
+  // With plenty of footage the shortfall goes to extra shots, and the length is hit.
+  const rich: Analysis = { ...analysis, clips: Array.from({ length: 8 }, (_, i) => fakeClip(`v${i + 1}`, 20)) };
+  const r = buildPlan(rich, hypeTheme([{ id: "v1" }, { id: "v2" }, { id: "v3" }]), { durationOverride: 15 });
+  assert.ok(Math.abs(planDurationInFrames(r.plan) / 30 - 15) < 1);
+  r.plan.scenes.forEach((s, i) => assert.ok(s.duration <= limitOf(r.plan, i), `${s.id} holds ${s.duration}s`));
+});
+
+test("short clips never shorten their scene; clips under a beat are dropped", () => {
+  const a: Analysis = { ...analysis, clips: [fakeClip("v1", 0.6), fakeClip("v2", 1.3), fakeClip("v3", 12), fakeClip("v4", 9)], photos: [] };
+  const { plan } = buildPlan(a, hypeTheme([{ id: "v1" }, { id: "v2" }, { id: "v3" }, { id: "v4" }]), { durationOverride: 15 });
+  assert.ok(!plan.scenes.some((s) => s.kind === "video" && s.src === "assets/v1.mp4"), "a clip shorter than a beat is left out");
+  const segs = timelineSegments(plan);
+  for (const s of videoScenes(plan)) {
+    assert.ok(s.trimStart >= 0 && s.trimStart + s.duration <= s.sourceDuration + 1e-6, `${s.id} runs past its clip`);
+    assert.equal(Math.round(s.duration * 30), segs.find((g) => g.key === s.id)!.frames, `${s.id} keeps its full slot`);
+  }
+  // Every cut still on the (half-)beat.
+  const beat = 60 / plan.music!.bpm / 2;
+  for (const c of cutTimes(plan, segs, (x, y) => transitionFrames(plan, x, y)).slice(0, -1)) {
+    assert.ok(Math.abs(c / beat - Math.round(c / beat)) * beat <= 1.01 / 30, `cut at ${c}s is off the beat`);
+  }
+});
+
+test("clip loudness is evened out toward the edit's typical level, within ±9 dB", () => {
+  const loud = { ...fakeClip("v1", 10), levels: Array(20).fill(-10) };
+  const mid = { ...fakeClip("v2", 10), levels: Array(20).fill(-25) };
+  const quiet = { ...fakeClip("v3", 10), levels: Array(20).fill(-45) };
+  const a: Analysis = { ...analysis, clips: [loud, mid, quiet], photos: [] };
+  const { plan } = buildPlan(a, hypeTheme([{ id: "v1" }, { id: "v2" }, { id: "v3" }]), { durationOverride: 12 });
+  const dbOf = (src: string) => videoScenes(plan).filter((s) => s.src === src).map((s) => 20 * Math.log10(s.volume / STYLES.hype.clipVolume));
+  for (const d of dbOf("assets/v1.mp4")) assert.ok(Math.abs(d + 9) < 0.2, `loud clip down 9 dB (capped), got ${d}`);
+  for (const d of dbOf("assets/v2.mp4")) assert.ok(Math.abs(d) < 0.2, `median clip unchanged, got ${d}`);
+  for (const d of dbOf("assets/v3.mp4")) assert.ok(Math.abs(d - 9) < 0.2, `quiet clip up 9 dB (capped), got ${d}`);
+  assert.equal(levelGainDb(-70, -25), 0, "near-silence is not boosted");
+  assert.ok(Math.abs(shotLevel(mid, 0, 4) + 25) < 1e-6);
+});
+
+test("clip sound always fades at scene edges, equal-power over transitions", () => {
+  const scene = { volume: 0.5, trimStart: 0, speed: 1 };
+  assert.equal(sceneVolume(scene, 0, 90, 30), 0, "starts silent: no click");
+  assert.ok(sceneVolume(scene, 1.5, 90, 30) > 0 && sceneVolume(scene, 1.5, 90, 30) < 0.5);
+  assert.equal(sceneVolume(scene, 45, 90, 30), 0.5);
+  assert.ok(sceneVolume(scene, 90, 90, 30) < 1e-9, "ends silent");
+  // Halfway through a 10-frame crossfade the clip sits at −3 dB, so both sides' powers sum to 1.
+  const half = sceneVolume(scene, 5, 90, 30, { in: 10 }) / 0.5;
+  assert.ok(Math.abs(half * half - 0.5) < 1e-9);
+});
+
+test("dark or blurry photos are skipped and the rest ranked by quality", () => {
+  assert.ok(photoQuality({ luma: 0.02, detail: 10 }, 10) < PHOTO_MIN, "black frame");
+  assert.ok(photoQuality({ luma: 0.4, detail: 2 }, 10) < PHOTO_MIN, "blurred");
+  assert.ok(photoQuality({ luma: 0.4, detail: 10 }, 10) > 0.9);
+  const photo = (id: string, luma: number, detail: number) => ({ id, kind: "image" as const, name: `${id}.jpg`, folder: "", width: 1600, height: 1200, proxy: `assets/${id}.jpg`, luma, detail });
+  const photos = [photo("p4", 0.02, 9), photo("p5", 0.4, 10), photo("p6", 0.4, 1), photo("p7", 0.35, 11)];
+  const { plan } = buildPlan({ ...analysis, photos }, hypeTheme(), { durationOverride: 20 });
+  const used = plan.scenes.flatMap((s) => (s.kind === "image" ? [s.src] : []));
+  assert.ok(used.length > 0);
+  assert.ok(!used.includes("assets/p4.jpg") && !used.includes("assets/p6.jpg"), JSON.stringify(used));
+});
+
+test("near-duplicate clips are found by middle-frame hash and length", () => {
+  const clips = [
+    { duration: 10, dhash: "f0f0f0f0f0f0f0f0" },
+    { duration: 10.2, dhash: "f0f0f0f0f0f0f0f1" }, // the same clip re-uploaded
+    { duration: 30, dhash: "f0f0f0f0f0f0f0f0" }, // same framing, different clip
+    { duration: 10, dhash: "0f0f0f0f0f0f0f0f" },
+  ];
+  assert.deepEqual(duplicateClips(clips), [1]);
+});
+
+test("EXIF orientation is read from a JPEG header", () => {
+  // SOI, APP1 "Exif\0\0", little-endian TIFF with one IFD entry: Orientation (0x0112) = 6.
+  const tiff = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0x08, 0, 0, 0, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0, 0, 0, 0x06, 0x00, 0, 0, 0, 0, 0, 0]);
+  const app1 = Buffer.concat([Buffer.from([0x45, 0x78, 0x69, 0x66, 0, 0]), tiff]);
+  const size = app1.length + 2;
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1, size >> 8, size & 0xff]), app1, Buffer.from([0xff, 0xda, 0, 2])]);
+  assert.equal(exifOrientation(jpeg), 6);
+  assert.equal(ORIENT_FILTER[6], "transpose=1");
+  assert.equal(exifOrientation(Buffer.from([0xff, 0xd8, 0xff, 0xda, 0, 2])), 1);
 });

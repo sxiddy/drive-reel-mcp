@@ -12,3 +12,7 @@ tsconfig.tsbuildinfo
 guide/
 
 *.secret.txt
+
+music/library/
+
+tests/tmp/

@@ -21,6 +21,8 @@ import { CardView, MotionIntro, MotionOutro } from "./cards";
 import { AnimatedHeading, BodyText, Caption, Graded, Overlays, Subtitles, makeLook, textShadow, useCorrection, type Look } from "./components";
 import { musicDuck, sceneVolume, speechTimeline } from "./audio";
 import { MotionField } from "./motion";
+import { whip } from "./whip";
+import { BackdropOutro, OpeningTitle, TimeChip, framing } from "./opening";
 
 const SLIDE_DIRS = ["from-right", "from-bottom", "from-left", "from-top"] as const;
 const WIPE_DIRS = ["from-left", "from-top-right", "from-right", "from-bottom-left"] as const;
@@ -42,6 +44,8 @@ function presentationFor(plan: EditPlan, index: number, width: number, height: n
         return pushCut({ flashColor: "#ffffff", flashOpacity: 0.55 });
       case "flip":
         return flip({ direction: SLIDE_DIRS[index % SLIDE_DIRS.length] });
+      case "whip":
+        return whip({ direction: index % 3 === 2 ? -1 : 1, width });
       default:
         return fade();
     }
@@ -56,7 +60,7 @@ export function needsContainedFit(scene: Pick<VideoScene, "srcWidth" | "srcHeigh
   return ratio < 1 / 1.15 || ratio > 1.15;
 }
 
-const VideoView: React.FC<{ scene: VideoScene; plan: EditPlan; look: Look; frames: number }> = ({ scene, plan, look, frames }) => {
+const VideoView: React.FC<{ scene: VideoScene; plan: EditPlan; look: Look; frames: number; edges: { in: number; out: number }; opening?: boolean }> = ({ scene, plan, look, frames, edges, opening }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
   // Slow push-in for calm styles; quick punch-in that settles for energetic ones.
@@ -68,60 +72,32 @@ const VideoView: React.FC<{ scene: VideoScene; plan: EditPlan; look: Look; frame
   const trimBefore = Math.round(scene.trimStart * fps);
   const corr = useCorrection(scene.grade);
   // The clip's own sound: its set level, lifted while someone talks (the music ducks under it, see Music).
-  const volume = (f: number) => sceneVolume(scene, f, frames, fps);
+  const volume = (f: number) => sceneVolume(scene, f, frames, fps, edges);
   const words = scene.captions?.length ? (
     <Subtitles cues={scene.captions} look={look} trimStart={scene.trimStart} speed={scene.speed} durationInFrames={frames} aboveCaption={!!scene.caption} />
   ) : null;
 
-  if (needsContainedFit(scene, width, height)) {
-    // Contain the clip over a blurred, darkened, scaled-up copy of itself (the same treatment photos get).
-    const srcAspect = scene.srcWidth! / scene.srcHeight!;
-    const boxW = srcAspect < width / height ? height * srcAspect : width;
-    const boxH = srcAspect < width / height ? height : width / srcAspect;
-    // Contained clips get a gentler move so less of the frame is pushed out of view.
-    const fgScale = 1 + (scale - 1) * 0.6;
-    return (
-      <AbsoluteFill style={{ backgroundColor: "#000" }}>
-        {corr.defs}
-        <AbsoluteFill style={{ filter: `${corr.filter} blur(${look.unit * 0.035}px) brightness(0.5) saturate(1.15)`, transform: `scale(${1.25 + (scale - 1) * 0.5})` }}>
-          <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} muted pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-        </AbsoluteFill>
-        <Graded look={look} correction={corr.filter}>
-          <AbsoluteFill style={{ justifyContent: "center", alignItems: "center" }}>
-            <div
-              style={{
-                width: boxW,
-                height: boxH,
-                transform: `scale(${fgScale})`,
-                boxShadow: `0 ${look.unit * 0.02}px ${look.unit * 0.08}px rgba(0,0,0,0.55)`,
-                overflow: "hidden",
-              }}
-            >
-              <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-            </div>
-          </AbsoluteFill>
-        </Graded>
-        {scene.caption ? <Caption text={scene.caption} look={look} durationInFrames={frames} /> : null}
-        {words}
-      </AbsoluteFill>
-    );
-  }
+  // A clip shaped unlike the frame (a phone clip in 16:9) fills it, reframed on where people usually are:
+  // the upper third of a portrait shot. Small letterboxed clips over blurred bars read as amateur.
+  const reframe = framing(scene, needsContainedFit(scene, width, height) ? (scene.srcHeight! > scene.srcWidth! ? "50% 32%" : "50% 50%") : "50% 50%");
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
       {corr.defs}
       <Graded look={look} correction={corr.filter}>
         <AbsoluteFill style={{ transform: `scale(${scale})` }}>
-          <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: reframe }} />
         </AbsoluteFill>
       </Graded>
       {scene.caption ? <Caption text={scene.caption} look={look} durationInFrames={frames} /> : null}
       {words}
+      {scene.chip ? <TimeChip text={scene.chip} look={look} frames={frames} /> : null}
+      {opening ? <OpeningTitle plan={plan} look={look} frames={frames} /> : null}
     </AbsoluteFill>
   );
 };
 
-const ImageView: React.FC<{ scene: ImageScene; plan: EditPlan; look: Look; frames: number }> = ({ scene, plan, look, frames }) => {
+const ImageView: React.FC<{ scene: ImageScene; plan: EditPlan; look: Look; frames: number; opening?: boolean }> = ({ scene, plan, look, frames, opening }) => {
   const frame = useCurrentFrame();
   const p = interpolate(frame, [0, frames], [0, 1]);
   const m = scene.motion;
@@ -131,14 +107,15 @@ const ImageView: React.FC<{ scene: ImageScene; plan: EditPlan; look: Look; frame
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
       {corr.defs}
-      {/* Blurred fill behind the photo so portrait photos work in landscape frames and vice versa. */}
-      <Img src={resolveAsset(plan, scene.src)} style={{ position: "absolute", width: "100%", height: "100%", objectFit: "cover", filter: `${corr.filter} blur(40px) brightness(0.6)`, transform: "scale(1.2)" }} />
       <Graded look={look} correction={corr.filter}>
         <AbsoluteFill style={{ transform: `scale(${scale}) translateX(${tx}%)` }}>
-          <Img src={resolveAsset(plan, scene.src)} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+          {/* Fills the frame like clips do; a portrait photo is cropped toward its upper third, where faces usually are. */}
+          <Img src={resolveAsset(plan, scene.src)} style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: framing(scene, "50% 35%") }} />
         </AbsoluteFill>
       </Graded>
       {scene.caption ? <Caption text={scene.caption} look={look} durationInFrames={frames} /> : null}
+      {scene.chip ? <TimeChip text={scene.chip} look={look} frames={frames} /> : null}
+      {opening ? <OpeningTitle plan={plan} look={look} frames={frames} /> : null}
     </AbsoluteFill>
   );
 };
@@ -147,20 +124,36 @@ type Backdrop = { scene: VideoScene | ImageScene; trimStart: number };
 
 /**
  * Footage for the title's backdrop. Never scene 1 (the first shot would otherwise play twice in the opening
- * seconds): prefer a video from the middle of the reel with a different clip, then a photo, then any other
- * scene, and play a part of the clip that its own scene doesn't use.
+ * seconds), and never footage any scene plays: prefer a video from the middle of the reel with a different
+ * clip, playing a stretch of it that no scene uses; then a photo; then any other scene.
  */
 export function pickIntroBackdrop(plan: EditPlan): Backdrop | undefined {
   const first = plan.scenes[0];
   const firstSrc = first && first.kind !== "card" ? first.src : undefined;
   const mid = (plan.scenes.length - 1) / 2;
-  const byMiddle = (list: { s: VideoScene | ImageScene; i: number }[]): VideoScene | ImageScene | undefined =>
-    [...list].sort((a, b) => Math.abs(a.i - mid) - Math.abs(b.i - mid))[0]?.s;
+  const byMiddle = <T extends { i: number }>(list: T[]) => [...list].sort((a, b) => Math.abs(a.i - mid) - Math.abs(b.i - mid));
   const indexed = plan.scenes.map((s, i) => ({ s, i })).filter(({ i }) => i > 0);
   const videos = indexed.filter((x): x is { s: VideoScene; i: number } => x.s.kind === "video");
   const images = indexed.filter((x): x is { s: ImageScene; i: number } => x.s.kind === "image");
+  // Stretches of each clip that some scene plays, in source seconds.
+  const usedBySrc = new Map<string, [number, number][]>();
+  for (const s of plan.scenes) if (s.kind === "video") usedBySrc.set(s.src, [...(usedBySrc.get(s.src) ?? []), [s.trimStart, s.trimStart + s.duration * s.speed]]);
+  const freeStart = (v: VideoScene): number | undefined => {
+    const need = plan.intro.duration * v.speed + 0.1;
+    const used = [...(usedBySrc.get(v.src) ?? [])].sort((a, b) => a[0] - b[0]);
+    let at = 0;
+    for (const [a, b] of [...used, [v.sourceDuration, v.sourceDuration] as [number, number]]) {
+      if (a - at >= need) return at;
+      at = Math.max(at, b);
+    }
+    return undefined;
+  };
+  for (const { s } of [...byMiddle(videos.filter((x) => x.s.src !== firstSrc)), ...byMiddle(videos)]) {
+    const t = freeStart(s);
+    if (t !== undefined) return { scene: s, trimStart: t };
+  }
   const pick: VideoScene | ImageScene | undefined =
-    byMiddle(videos.filter((x) => x.s.src !== firstSrc)) ?? byMiddle(images.filter((x) => x.s.src !== firstSrc)) ?? byMiddle(videos) ?? byMiddle(images);
+    byMiddle(images.filter((x) => x.s.src !== firstSrc)).at(0)?.s ?? byMiddle(videos.filter((x) => x.s.src !== firstSrc)).at(0)?.s ?? byMiddle(videos).at(0)?.s ?? byMiddle(images).at(0)?.s;
   if (!pick) return undefined;
   if (pick.kind === "image") return { scene: pick, trimStart: 0 };
   const used = pick.duration * pick.speed;
@@ -217,6 +210,7 @@ const IntroView: React.FC<{ plan: EditPlan; look: Look; backdrop: Backdrop; fram
 const OutroView: React.FC<{ plan: EditPlan; look: Look; frames: number; startFrame: number }> = ({ plan, look, frames, startFrame }) => {
   const frame = useCurrentFrame();
   const u = look.unit;
+  if (plan.outro.backdrop) return <BackdropOutro plan={plan} look={look} frames={frames} />;
   return (
     <AbsoluteFill>
       <MotionField look={look} globalFrame={startFrame + frame} bpm={plan.music?.bpm} variant={3} />
@@ -305,6 +299,7 @@ export const Reel: React.FC<{ plan: EditPlan }> = ({ plan }) => {
     }
     const sceneIndex = plan.scenes.findIndex((s) => s.id === seg.key);
     const scene = plan.scenes[sceneIndex];
+    const opening = !!plan.opening && sceneIndex === 0 && plan.intro.duration === 0;
     let body: React.ReactNode;
     if (seg.key === "intro") {
       body =
@@ -316,9 +311,14 @@ export const Reel: React.FC<{ plan: EditPlan }> = ({ plan }) => {
         <OutroView plan={plan} look={look} frames={seg.frames} startFrame={start} />
       );
     } else if (scene.kind === "video") {
-      body = <VideoView scene={scene} plan={plan} look={look} frames={seg.frames} />;
+      // Fade the clip's sound over the transitions it shares with its neighbours.
+      const edges = {
+        in: i > 0 ? transitionFrames(plan, segs[i - 1].frames, seg.frames) : 0,
+        out: i < segs.length - 1 ? transitionFrames(plan, seg.frames, segs[i + 1].frames) : 0,
+      };
+      body = <VideoView scene={scene} plan={plan} look={look} frames={seg.frames} edges={edges} opening={opening} />;
     } else if (scene.kind === "image") {
-      body = <ImageView scene={scene} plan={plan} look={look} frames={seg.frames} />;
+      body = <ImageView scene={scene} plan={plan} look={look} frames={seg.frames} opening={opening} />;
     } else {
       body = (
         <CardView scene={scene} plan={plan} look={look} index={cards.indexOf(scene)} total={cards.length} frames={seg.frames} startFrame={start} branded={motionOnly} />

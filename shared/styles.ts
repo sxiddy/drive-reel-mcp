@@ -32,7 +32,7 @@ export type StyleDef = {
   /** Optional colour wash blended over footage. */
   wash?: { color: string; blend: "soft-light" | "overlay" | "multiply" | "screen"; opacity: number };
   overlay: { letterbox?: boolean; grain?: number; vignette?: number; glow?: boolean };
-  transition: { type: "fade" | "slide" | "wipe" | "clockWipe" | "iris" | "pushCut" | "flip" | "none"; duration: number };
+  transition: { type: "fade" | "slide" | "wipe" | "clockWipe" | "iris" | "pushCut" | "flip" | "whip" | "none"; duration: number };
   /** Target seconds per shot; snapped to the music beat. */
   shotLength: number;
   textAnimation: "rise" | "slam" | "type" | "fade" | "pop" | "glitch";
@@ -67,8 +67,8 @@ export const STYLES: Record<StyleId, StyleDef> = {
     grade: "contrast(1.12) saturate(0.92) brightness(0.96)",
     wash: { color: "linear-gradient(135deg, rgba(0,128,128,0.35), rgba(255,140,0,0.25))", blend: "soft-light", opacity: 1 },
     overlay: { letterbox: true, vignette: 0.45, grain: 0.05 },
-    transition: { type: "fade", duration: 0.8 },
-    shotLength: 3.4,
+    transition: { type: "fade", duration: 0.5 },
+    shotLength: 2.6,
     textAnimation: "rise",
     headingCase: "title",
     music: { bpm: 76, mode: "minor", drums: "halftime", brightness: 0.35 },
@@ -80,14 +80,15 @@ export const STYLES: Record<StyleId, StyleDef> = {
     id: "hype",
     name: "Hype Reel",
     bestFor: "fests, sports, launches, parties, hackathons, high-energy footage with lots of motion",
-    feel: "Hard punchy cuts on the beat, white flashes, huge condensed type, saturated contrast, 128 BPM drums.",
+    feel: "Fast cuts on the beat with motion-blur whips, bursts on the drop, huge condensed type, warm punchy contrast, 128 BPM drums.",
     headingFont: "Anton",
     bodyFont: "SpaceGrotesk",
     palette: { bg: "#0a0a0a", fg: "#ffffff", accent: "#ff3b30" },
-    grade: "contrast(1.22) saturate(1.3)",
+    grade: "contrast(1.18) saturate(1.28) sepia(0.06) brightness(1.02)",
+    wash: { color: "linear-gradient(160deg, rgba(255,150,60,0.22), rgba(255,60,40,0.12))", blend: "soft-light", opacity: 1 },
     overlay: { vignette: 0.3 },
-    transition: { type: "pushCut", duration: 0.33 },
-    shotLength: 1.4,
+    transition: { type: "whip", duration: 0.2 },
+    shotLength: 0.95,
     textAnimation: "slam",
     headingCase: "upper",
     music: { bpm: 128, mode: "minor", drums: "four", brightness: 0.8 },
@@ -106,8 +107,8 @@ export const STYLES: Record<StyleId, StyleDef> = {
     grade: "sepia(0.28) saturate(0.85) contrast(0.95) brightness(1.04)",
     wash: { color: "rgba(255,170,90,0.28)", blend: "soft-light", opacity: 1 },
     overlay: { grain: 0.12, vignette: 0.55 },
-    transition: { type: "fade", duration: 0.7 },
-    shotLength: 2.6,
+    transition: { type: "fade", duration: 0.5 },
+    shotLength: 2.2,
     textAnimation: "type",
     headingCase: "title",
     music: { bpm: 92, mode: "major", drums: "soft", brightness: 0.45 },
@@ -125,8 +126,8 @@ export const STYLES: Record<StyleId, StyleDef> = {
     palette: { bg: "#f6f3ee", fg: "#1d1b18", accent: "#b08d57" },
     grade: "saturate(0.75) contrast(1.02) brightness(1.06)",
     overlay: { vignette: 0.15 },
-    transition: { type: "fade", duration: 1 },
-    shotLength: 3.2,
+    transition: { type: "fade", duration: 0.7 },
+    shotLength: 2.8,
     textAnimation: "fade",
     headingCase: "upper",
     music: { bpm: 70, mode: "major", drums: "none", brightness: 0.3 },
@@ -183,8 +184,8 @@ export const STYLES: Record<StyleId, StyleDef> = {
     grade: "contrast(1.18) saturate(1.35) hue-rotate(-8deg)",
     wash: { color: "linear-gradient(160deg, rgba(255,43,214,0.35), rgba(0,229,255,0.3))", blend: "overlay", opacity: 1 },
     overlay: { glow: true, vignette: 0.5 },
-    transition: { type: "clockWipe", duration: 0.45 },
-    shotLength: 1.8,
+    transition: { type: "whip", duration: 0.22 },
+    shotLength: 1.2,
     textAnimation: "glitch",
     headingCase: "upper",
     music: { bpm: 120, mode: "minor", drums: "four", brightness: 0.9 },

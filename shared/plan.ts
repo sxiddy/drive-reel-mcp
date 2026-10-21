@@ -7,7 +7,7 @@ import { STYLE_IDS } from "./styles";
  * Asset paths are relative to `assetBase`, so the same plan works locally and on the site.
  */
 
-export const TransitionType = z.enum(["fade", "slide", "wipe", "clockWipe", "iris", "pushCut", "flip", "none"]);
+export const TransitionType = z.enum(["fade", "slide", "wipe", "clockWipe", "iris", "pushCut", "flip", "whip", "none"]);
 export type TransitionType = z.infer<typeof TransitionType>;
 
 export const AspectRatio = z.enum(["16:9", "9:16", "1:1"]);
@@ -16,9 +16,14 @@ export type AspectRatio = z.infer<typeof AspectRatio>;
 const SceneBase = z.object({
   id: z.string(),
   /** Seconds this scene stays on screen, not counting the transition overlap. */
-  duration: z.number().min(0.4).max(60),
+  duration: z.number().min(0.2).max(60),
   caption: z.string().max(140).optional(),
+  /** Small time-of-day tag shown on the shot, e.g. "10:49 PM" (capture time). */
+  chip: z.string().max(16).optional(),
 });
+
+/** Point of the source frame to keep in view when it is cropped to fill (0..1, x and y), e.g. the faces' centre. */
+export const Focus = z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)]);
 
 /**
  * Per-shot colour correction that pulls footage from different phones toward the folder's typical colour,
@@ -62,6 +67,7 @@ export const VideoScene = SceneBase.extend({
   speech: z.array(SpeechWindow).max(300).optional(),
   /** Subtitles for what is said, timed against the source clip. */
   captions: z.array(CaptionCue).max(500).optional(),
+  focus: Focus.optional(),
 });
 
 export const ImageScene = SceneBase.extend({
@@ -70,6 +76,7 @@ export const ImageScene = SceneBase.extend({
   /** Ken Burns direction. */
   motion: z.enum(["zoomIn", "zoomOut", "panLeft", "panRight"]).default("zoomIn"),
   grade: Grade.optional(),
+  focus: Focus.optional(),
 });
 
 export const CARD_ICONS = ["book", "clock", "chart", "users", "spark", "check", "calendar", "chat", "bolt", "star", "target", "bulb", "search", "shield", "rocket", "heart"] as const;
@@ -134,7 +141,19 @@ export const EditPlan = z.object({
     })
     .nullable(),
   intro: z.object({ duration: z.number().min(0).max(8) }),
-  outro: z.object({ text: z.string().max(80), duration: z.number().min(0).max(8) }),
+  /**
+   * Title drawn over the first shot instead of a separate title card: big spaced caps, with 2.39:1
+   * letterbox bars that open up once the title has gone.
+   */
+  opening: z.object({ letterbox: z.boolean() }).optional(),
+  /** Date line for the end card, e.g. "18–19 September 2026" (from the footage's capture times). */
+  dateLine: z.string().max(60).optional(),
+  outro: z.object({
+    text: z.string().max(80),
+    duration: z.number().min(0).max(8),
+    /** Shot shown blurred and darkened behind the end card (usually the closing group shot). */
+    backdrop: z.object({ src: z.string(), kind: z.enum(["video", "image"]), trimStart: z.number().min(0).optional() }).optional(),
+  }),
   transition: z.object({ type: TransitionType, duration: z.number().min(0).max(1.5) }),
   scenes: z.array(Scene).min(1).max(120),
 });
@@ -187,12 +206,13 @@ export function isSafeAssetPath(p: string) {
 }
 
 /** Every asset a plan points at (clips, photos, card images, music). */
-export function planAssetPaths(plan: Pick<EditPlan, "scenes" | "music">): string[] {
+export function planAssetPaths(plan: Pick<EditPlan, "scenes" | "music"> & { outro?: EditPlan["outro"] }): string[] {
   const set = new Set<string>();
   for (const s of plan.scenes) {
     if (s.kind !== "card") set.add(s.src);
     else if (s.image) set.add(s.image);
   }
+  if (plan.outro?.backdrop) set.add(plan.outro.backdrop.src);
   if (plan.music) set.add(plan.music.src);
   return [...set];
 }

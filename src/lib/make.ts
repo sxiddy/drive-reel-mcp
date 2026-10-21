@@ -42,6 +42,14 @@ export function sweepFootage(now = Date.now()) {
     for (const d of FOOTAGE_DIRS) fs.rmSync(path.join(dir, d), { recursive: true, force: true });
     writeStatus(dir, { ...s, footageCleared: true });
   }
+  // Uploaded songs are copied into their project when the job starts; a day later the upload can go.
+  const uploads = path.join(ROOT, "work", "uploads");
+  if (fs.existsSync(uploads)) {
+    for (const f of fs.readdirSync(uploads)) {
+      const file = path.join(uploads, f);
+      if (now - fs.statSync(file).mtimeMs > KEEP_UNCHOSEN_MS) fs.rmSync(file, { force: true });
+    }
+  }
 }
 
 const g = globalThis as { __footageSweep?: NodeJS.Timeout };
@@ -117,7 +125,7 @@ export class MakeError extends Error {
 }
 
 /** Starts analysing a Drive folder. `auto` renders Claude's first theme straight away ("Just make it"). */
-export function startMake(input: { source: string; occasion: string; duration: number; auto: boolean }): MakeStatus {
+export function startMake(input: { source: string; occasion: string; duration: number; eventName?: string; place?: string; auto: boolean; music?: "library" | "own"; songId?: string }): MakeStatus {
   try {
     sweepFootage();
   } catch (e) {
@@ -135,7 +143,7 @@ export function startMake(input: { source: string; occasion: string; duration: n
     id,
     createdAt: now,
     updatedAt: now,
-    input: { source: input.source, occasion: input.occasion, duration: input.duration },
+    input: { source: input.source, occasion: input.occasion, duration: input.duration, ...(input.eventName ? { eventName: input.eventName } : {}), ...(input.place ? { place: input.place } : {}), ...(input.music ? { music: input.music } : {}), ...(input.songId ? { songId: input.songId } : {}) },
     step: "queued",
     stage: "Starting",
     progress: 0,

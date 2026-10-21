@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { contentType, parseRange } from "@/render/static-server";
+import { markViewed } from "@/src/lib/retention";
 import { isVideoId, safeJoin, videoDir } from "@/src/lib/store";
 
 export const runtime = "nodejs";
@@ -25,6 +26,8 @@ const segmentOk =(s: string) => SEGMENT.test(s) && !/[. ]$/.test(s) && !s.includ
 export async function GET(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
   const [id, ...rest] = (await ctx.params).path;
   if (!id || !isVideoId(id) || rest.length === 0 || !rest.every(segmentOk)) return new Response("not found", { status: 404 });
+  // Playing a render counts as a view, which keeps the video from expiring (src/lib/retention.ts).
+  if (rest[0] === "renders") markViewed(id);
   const ext = path.extname(rest[rest.length - 1]).toLowerCase();
   if (!SERVABLE.has(ext)) return new Response("not found", { status: 404 });
   // renders/ only serves finished outputs by their exact names: vN.mp4/.jpg, the 720p and 4K files and the

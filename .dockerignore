@@ -7,3 +7,5 @@ data
 *.log
 
 *.secret.txt
+
+music/library

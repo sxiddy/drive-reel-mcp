@@ -10,17 +10,21 @@ import {
   frameStats,
   hamming,
   imageColor,
+  imageQuality,
   isHdr,
   makeAudioProxy,
   makeImageProxy,
   makeVideoProxy,
   photoSheet,
+  rotateVideoProxy,
   probe,
   speechWindows,
   type ColorStat,
   type FrameStat,
 } from "./media";
-import { detectBeats } from "./beats";
+import { detectBeats, detectDrop } from "./beats";
+import { exifTakenAt, timeFromName, timeFromTags } from "./capture";
+import { clipFaces, facesAt, sidewaysRotation, type FaceSample } from "./faces";
 import { isTranscriberAvailable, transcribe } from "./transcribe";
 import type { AspectRatio, CaptionCue } from "../shared/plan";
 
@@ -46,11 +50,17 @@ export type ClipInfo = {
   motion: number[];
   /** Per half-second, 0..1: 0 = too dark or smeared (motion blur, shaky pan) to use, 1 = clean. */
   quality?: number[];
+  /** Per half-second edge density (absolute). Compared across the folder, it flags blurry swings and bare walls. */
+  detail?: number[];
   /** Seconds where the footage itself hard-cuts (multi-shot clips, and the joins of a sampled long clip). */
   cuts: number[];
   /** Best few windows by combined score, for Claude's reference. */
   highlights: { start: number; end: number; score: number }[];
   audioLevel: "silent" | "quiet" | "lively" | "loud";
+  /** Per half-second RMS level of the clip's sound, dBFS (−90 = silence). The planner evens out loudness from it. */
+  levels?: number[];
+  /** 64-bit difference hash (hex) of the middle frame, to spot the same clip uploaded twice. */
+  dhash?: string;
   /** HDR phone footage, tonemapped to SDR in the proxy. */
   hdr?: boolean;
   /** Long clips are proxied as segments spread across the whole recording. */
@@ -65,11 +75,43 @@ export type ClipInfo = {
   speech?: [number, number][];
   /** Subtitle cues for that speech, when a speech-to-text engine is set up (see transcribe.ts). */
   transcript?: CaptionCue[];
+  /** Capture time, ISO 8601 (see capture.ts: with a zone it is absolute, without it is wall-clock). */
+  takenAt?: string;
+  /** Faces on a few evenly spaced frames (proxy seconds). */
+  faces?: FaceSample[];
+  /** The clip was filmed sideways and its proxy was turned this many degrees clockwise. */
+  rotated?: 90 | 270;
 };
 
-export type PhotoInfo = { id: string; kind: "image"; name: string; folder: string; width: number; height: number; proxy: string; notes?: string; color?: ColorStat };
+/** luma (0..1) and detail (edge density, same scale as ClipInfo.detail) are measured on the proxy, so dark or blurry photos can be skipped. */
+export type PhotoInfo = { id: string; kind: "image"; name: string; folder: string; width: number; height: number; proxy: string; notes?: string; color?: ColorStat; luma?: number; detail?: number; takenAt?: string; faces?: FaceSample };
+
+/**
+ * Indices of clips that repeat an earlier one: middle frames within 6 bits of each other and the same length
+ * (within 0.5 s or 3%). Different moments of one event rarely match both.
+ */
+export function duplicateClips(clips: Pick<ClipInfo, "duration" | "dhash">[]): number[] {
+  const out: number[] = [];
+  clips.forEach((c, i) => {
+    if (!c.dhash) return;
+    const h = BigInt(`0x${c.dhash}`);
+    const dup = clips.slice(0, i).some((o, j) => !out.includes(j) && o.dhash && Math.abs(o.duration - c.duration) <= Math.max(0.5, 0.03 * c.duration) && hamming(BigInt(`0x${o.dhash}`), h) <= 6);
+    if (dup) out.push(i);
+  });
+  return out;
+}
 /** bpm/beatOffset come from beat detection, so cuts land on this song's beat. */
-export type AudioInfo = { id: string; kind: "audio"; name: string; duration: number; proxy: string; bpm?: number; beatOffset?: number };
+export type AudioInfo = { id: string; kind: "audio"; name: string; duration: number; proxy: string; bpm?: number; beatOffset?: number; /** Seconds where the song's drop starts. */ dropAt?: number };
+
+/** Proxies a song, finds its beat grid and drop (Drive audio files and songs uploaded on the website). */
+export async function prepareSong(src: string, projectDir: string, id: string, name: string): Promise<AudioInfo> {
+  const proxy = `assets/${id}.m4a`;
+  await makeAudioProxy(src, path.join(projectDir, proxy));
+  const p = await probe(path.join(projectDir, proxy));
+  const beats = await detectBeats(path.join(projectDir, proxy)).catch(() => undefined);
+  const dropAt = beats ? await detectDrop(path.join(projectDir, proxy), p.duration, beats.bpm, beats.offset).catch(() => undefined) : undefined;
+  return { id, kind: "audio", name, duration: round2(p.duration), proxy, bpm: beats?.bpm, beatOffset: beats?.offset, ...(dropAt !== undefined ? { dropAt } : {}) };
+}
 
 export type Analysis = {
   projectId: string;
@@ -85,6 +127,33 @@ export type Analysis = {
   totals: { footageSeconds: number; files: number };
   createdAt: string;
 };
+
+/**
+ * EXIF capture time of a photo. Photos are downloaded through Drive's thumbnail endpoint, which drops
+ * EXIF, so the first 512 KB of the original are fetched for it (local files are read directly).
+ */
+async function photoTakenAt(f: RemoteFile, downloaded: string): Promise<string | undefined> {
+  try {
+    if (path.isAbsolute(f.id) && fs.existsSync(f.id)) return exifTakenAt(readHead(f.id));
+    const local = exifTakenAt(readHead(downloaded));
+    if (local) return local;
+    const res = await fetch(`https://drive.usercontent.google.com/download?id=${encodeURIComponent(f.id)}&export=download&confirm=t`, { headers: { Range: "bytes=0-524287", "User-Agent": "Mozilla/5.0" } });
+    if (!res.ok || (res.headers.get("content-type") ?? "").includes("text/html")) return undefined;
+    return exifTakenAt(Buffer.from(await res.arrayBuffer()).subarray(0, 524288));
+  } catch {
+    return undefined;
+  }
+}
+
+function readHead(file: string, n = 524288) {
+  const fd = fs.openSync(file, "r");
+  try {
+    const b = Buffer.alloc(n);
+    return b.subarray(0, fs.readSync(fd, b, 0, n, 0));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
 
 export const LIMITS = { videos: 24, photos: 24, audio: 3 };
 const MAX_FILE_BYTES = 2e9;
@@ -195,7 +264,7 @@ function highlightsFor(energy: number[], motion: number[], quality: number[], cu
 }
 
 /** Everything measured from a clip's proxy (all times in proxy seconds). */
-export type ClipMeasures = Pick<ClipInfo, "energy" | "motion" | "quality" | "cuts" | "highlights" | "audioLevel" | "color" | "colorTrack" | "speech" | "transcript">;
+export type ClipMeasures = Pick<ClipInfo, "energy" | "motion" | "quality" | "detail" | "cuts" | "highlights" | "audioLevel" | "levels" | "color" | "colorTrack" | "speech" | "transcript">;
 
 /**
  * Watches and listens to a proxy: loudness, motion, usability, internal cuts and best moments; colour from
@@ -226,9 +295,11 @@ export async function measureVideoProxy(file: string, duration: number, hasAudio
     energy: energy.map(round2),
     motion: motion.map(round2),
     quality: quality.map(round2),
+    detail: bucket(stats, duration, (s) => s.edges, NaN).map((x) => Math.round(x * 10) / 10),
     cuts,
     highlights: highlightsFor(energy, motion, quality, cuts, duration),
     audioLevel: avgDb < -55 ? "silent" : avgDb < -35 ? "quiet" : avgDb < -20 ? "lively" : "loud",
+    levels: hasAudio ? rmsPadded.map((db) => Math.round(db * 10) / 10) : undefined,
     color: colors.length ? colorOf(colors) : undefined,
     colorTrack: colors.length ? fillGaps({ luma: track("luma"), u: track("u"), v: track("v"), sat: track("sat") }) : undefined,
     speech,
@@ -315,13 +386,14 @@ export async function analyzeSource(opts: {
         await makeImageProxy(dl.path, path.join(projectDir, proxy));
         // One signalstats frame: cheap, and lets photos join the colour match.
         const color = await imageColor(path.join(projectDir, proxy)).catch(() => undefined);
-        photos.push({ id, kind: "image", name: dl.name, folder: f.folder, width: p.width, height: p.height, proxy, color });
+        const q = await imageQuality(path.join(projectDir, proxy)).catch(() => undefined);
+        // Size from the upright proxy: the original's may be pre-rotation (EXIF orientation).
+        const pp = await probe(path.join(projectDir, proxy)).catch(() => p);
+        const takenAt = (await photoTakenAt(f, dl.path)) ?? timeFromName(dl.name);
+        const faces = await facesAt(path.join(projectDir, proxy), path.join(dirs.sheets, `${id}.face.raw`)).catch(() => undefined);
+        photos.push({ id, kind: "image", name: dl.name, folder: f.folder, width: pp.width || p.width, height: pp.height || p.height, proxy, color, ...(q ? { luma: q.luma, detail: q.detail } : {}), ...(takenAt ? { takenAt } : {}), ...(faces ? { faces } : {}) });
       } else if (kind === "audio" || (kind === "video" && !p.hasVideo && p.hasAudio)) {
-        const id = `a${i + 1}`;
-        const proxy = `assets/${id}.m4a`;
-        await makeAudioProxy(dl.path, path.join(projectDir, proxy));
-        const beats = await detectBeats(path.join(projectDir, proxy)).catch(() => undefined);
-        audio.push({ id, kind: "audio", name: dl.name, duration: round2(p.duration), proxy, bpm: beats?.bpm, beatOffset: beats?.offset });
+        audio.push(await prepareSong(dl.path, projectDir, `a${i + 1}`, dl.name));
       } else if (p.hasVideo && p.duration >= 0.8) {
         const id = `v${i + 1}`;
         const proxy = `assets/${id}.mp4`;
@@ -341,9 +413,19 @@ export async function analyzeSource(opts: {
           hasAudio: p.hasAudio,
           segments: sampled?.segments.map((g) => ({ start: g.sourceStart, length: g.length })),
         });
-        const pp = await probe(path.join(projectDir, proxy));
+        let pp = await probe(path.join(projectDir, proxy));
         const duration = pp.duration || p.duration;
         tick(`Watching ${dl.name} (${i + 1}/${media.length})`);
+        // Faces on a few frames; no faces upright but several turned 90° means it was filmed sideways.
+        const faceTmp = path.join(dirs.sheets, `${id}.face.raw`);
+        let faces = await clipFaces(path.join(projectDir, proxy), duration, faceTmp, 4).catch(() => undefined);
+        const rotated = faces ? await sidewaysRotation(path.join(projectDir, proxy), duration, faces, faceTmp).catch(() => undefined) : undefined;
+        if (rotated) {
+          await rotateVideoProxy(path.join(projectDir, proxy), rotated);
+          pp = await probe(path.join(projectDir, proxy));
+          faces = await clipFaces(path.join(projectDir, proxy), duration, faceTmp, 4).catch(() => undefined);
+        }
+        const takenAt = timeFromTags(p.tags ?? {}) ?? timeFromName(dl.name);
         const m = await measureVideoProxy(path.join(projectDir, proxy), duration, pp.hasAudio, sampled);
         const sheet = `sheets/${id}.jpg`;
         await contactSheet(path.join(projectDir, proxy), duration, path.join(projectDir, sheet));
@@ -364,6 +446,9 @@ export async function analyzeSource(opts: {
           ...m,
           hdr: isHdr(p) || undefined,
           sampled,
+          ...(takenAt ? { takenAt } : {}),
+          ...(faces ? { faces } : {}),
+          ...(rotated ? { rotated } : {}),
         });
       } else {
         skipped.push({ name: dl.name, reason: "too short or unreadable" });
@@ -381,6 +466,16 @@ export async function analyzeSource(opts: {
   clips.sort(byOrder);
   photos.sort(byOrder);
   audio.sort(byOrder);
+
+  // Drop clips uploaded twice (re-shares, the same clip from two phones' backups).
+  for (const c of clips) {
+    const h = await dHash(path.join(projectDir, c.proxy), path.join(dirs.sheets, "hash.raw"), c.duration / 2).catch(() => undefined);
+    if (h !== undefined) c.dhash = h.toString(16).padStart(16, "0");
+  }
+  for (const i of duplicateClips(clips).reverse()) {
+    skipped.push({ name: clips[i].name, reason: "near-duplicate of another clip" });
+    clips.splice(i, 1);
+  }
 
   // Drop near-duplicate photos (burst shots, the same picture uploaded twice).
   const hashes: bigint[] = [];

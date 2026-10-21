@@ -81,3 +81,34 @@ export async function detectBeats(file: string): Promise<{ bpm: number; offset: 
     fs.rmSync(raw, { force: true });
   }
 }
+
+/** Short-term loudness (LUFS) every 0.1 s via ffmpeg ebur128. */
+async function shortTermLoudness(file: string): Promise<{ t: number; s: number }[]> {
+  const { stderr } = await ffmpeg(["-nostats", "-i", file, "-filter_complex", "ebur128", "-f", "null", "-"]);
+  const out: { t: number; s: number }[] = [];
+  for (const m of stderr.matchAll(/t:\s*([\d.]+).*?S:\s*(-?[\d.]+|-inf)/g)) out.push({ t: +m[1], s: m[2] === "-inf" ? -70 : Math.max(-70, +m[2]) });
+  return out;
+}
+
+/**
+ * The song's drop: the biggest sustained loudness rise (mean of the next 8 s minus the previous 8 s, at
+ * least 1.5 LU), snapped to a bar of the beat grid. Same rule the music library was built with.
+ */
+export function findDrop(l: { t: number; s: number }[], duration: number, bpm: number, offset: number): number | undefined {
+  const mean = (a: number, b: number) => {
+    const xs = l.filter((p) => p.t >= a && p.t < b).map((p) => p.s);
+    return xs.reduce((x, y) => x + y, 0) / Math.max(1, xs.length);
+  };
+  let best = { t: 0, rise: 0 };
+  for (let t = 16; t < duration - 20; t += 0.5) {
+    const rise = mean(t + 1, t + 9) - mean(t - 8, t);
+    if (rise > best.rise) best = { t, rise };
+  }
+  if (best.rise < 1.5) return undefined;
+  const bar = (4 * 60) / bpm;
+  return +(offset + Math.round((best.t - offset) / bar) * bar).toFixed(2);
+}
+
+export async function detectDrop(file: string, duration: number, bpm: number, offset: number): Promise<number | undefined> {
+  return findDrop(await shortTermLoudness(file), duration, bpm, offset);
+}

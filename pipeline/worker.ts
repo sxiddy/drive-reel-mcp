@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { STYLES } from "../shared/styles";
-import { readStatus, writeStatus, type MakeStatus, type MakeTheme } from "../shared/make";
-import { analyzeSource } from "../mcp/analyze";
+import { readStatus, songPath, writeStatus, type MakeStatus, type MakeTheme } from "../shared/make";
+import { analyzeSource, prepareSong } from "../mcp/analyze";
 import { applyClipNotes, renderThemePreviews } from "../mcp/brief";
 import { autoThemes, claudeAvailable, proposeWithClaude } from "../mcp/claude";
 import { generateFromTheme } from "../mcp/generate";
@@ -66,6 +66,14 @@ async function analyze() {
     targetDuration: project.targetDuration,
     onProgress: (stage, p) => set({ stage, progress: p }, false),
   });
+  // A song uploaded on the form joins the folder's audio, first, so it is the one used.
+  const songId = status?.input.songId;
+  const song = songId ? songPath(ROOT, songId) : null;
+  if (song) {
+    set({ stage: "Listening to your song", progress: 0.97 });
+    analysis.audio.unshift(await prepareSong(song, dir, "a0", "Your song"));
+    fs.writeFileSync(path.join(dir, "analysis.json"), JSON.stringify(analysis, null, 2));
+  }
   const stats = { clips: analysis.clips.length, photos: analysis.photos.length, audio: analysis.audio.length, footageSeconds: Math.round(analysis.totals.footageSeconds) };
   if (!stats.clips && !stats.photos) throw new Error("No videos or photos could be read from this folder. Check it is shared as \"Anyone with the link\".");
 
@@ -84,7 +92,18 @@ async function analyze() {
   }
   proposal ??= autoThemes(analysis);
   applyClipNotes(analysis, dir, proposal.clipNotes);
-  const themes: Theme[] = proposal.themes.map((t, i) => ({ ...t, id: `t${i + 1}` }));
+  // The visitor's own event name and place beat anything guessed from the occasion.
+  const { eventName, place } = status?.input ?? {};
+  // Music: an uploaded song, else an audio file from the folder, else a royalty-free library track.
+  if (status?.input.music === "own" && !analysis.audio.length) themesNote = [themesNote, "The song couldn't be used, so a royalty-free track is used."].filter(Boolean).join(" ");
+  const musicChoice: Theme["music"] = analysis.audio.length ? "drive" : "library";
+  const themes: Theme[] = proposal.themes.map((t, i) => ({
+    ...t,
+    music: musicChoice,
+    id: `t${i + 1}`,
+    ...(eventName ? { title: eventName } : {}),
+    ...(place ? { subtitle: [place, t.subtitle].filter(Boolean).join(" · ").slice(0, 80) } : {}),
+  }));
   project.themes = themes;
   saveProject(project);
 

@@ -14,6 +14,7 @@ const TRANSITIONS: { id: TransitionType; label: string }[] = [
   { id: "slide", label: "Slide" },
   { id: "wipe", label: "Wipe" },
   { id: "pushCut", label: "Punch + flash" },
+  { id: "whip", label: "Whip (motion blur)" },
   { id: "clockWipe", label: "Clock / iris" },
   { id: "flip", label: "Flip" },
   { id: "none", label: "Hard cut" },

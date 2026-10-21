@@ -27,7 +27,17 @@ export type MakeStatus = {
   id: string;
   createdAt: string;
   updatedAt: string;
-  input: { source: string; occasion: string; duration: number };
+  input: {
+    source: string;
+    occasion: string;
+    duration: number;
+    eventName?: string;
+    place?: string;
+    /** "library" (default): a royalty-free track; "own": the visitor's song (uploaded, or an audio file in the folder). */
+    music?: "library" | "own";
+    /** Song uploaded on the form (work/uploads/<songId>.<ext>). */
+    songId?: string;
+  };
   step: MakeStep;
   /** What is happening right now, e.g. "Watching clip 3 of 9". */
   stage: string;
@@ -87,4 +97,33 @@ export function isDriveLink(s: string) {
   } catch {
     return false;
   }
+}
+
+/** Uploaded songs: 24 random hex characters, stored as work/uploads/<id>.<ext>. */
+export const isSongId = (id: string) => /^[a-f0-9]{24}$/.test(id);
+export const SONG_EXTS = ["mp3", "wav", "m4a", "aac", "ogg"] as const;
+export const MAX_SONG_BYTES = 40 * 1024 * 1024;
+
+/** The audio format a file's first bytes say it is, or null when it isn't a supported audio file. */
+export function sniffAudio(b: Uint8Array): (typeof SONG_EXTS)[number] | null {
+  const str = (a: number, n: number) => String.fromCharCode(...b.subarray(a, a + n));
+  if (b.length < 12) return null;
+  if (str(0, 3) === "ID3") return "mp3";
+  if (str(0, 4) === "RIFF" && str(8, 4) === "WAVE") return "wav";
+  if (str(0, 4) === "OggS") return "ogg";
+  if (str(4, 4) === "ftyp" && /^(M4A |M4B |mp42|isom|mp41|dash|iso[2-6])$/.test(str(8, 4))) return "m4a";
+  if (b[0] === 0xff && (b[1] & 0xf6) === 0xf0) return "aac"; // ADTS
+  if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0 && ((b[1] >> 1) & 3) !== 0) return "mp3"; // MPEG audio frame sync
+  return null;
+}
+
+/** Path of an uploaded song, or null when the id is malformed or the file is gone. */
+export function songPath(root: string, id: string): string | null {
+  if (!isSongId(id)) return null;
+  const dir = path.join(root, "work", "uploads");
+  for (const ext of SONG_EXTS) {
+    const f = path.join(dir, `${id}.${ext}`);
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
 }

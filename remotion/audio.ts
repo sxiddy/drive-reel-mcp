@@ -36,16 +36,34 @@ export function sceneSpeechFrames(scene: Pick<VideoScene, "speech" | "trimStart"
   return out;
 }
 
+/** Shortest fade at a scene's edges (s): even a hard cut gets this, so the clip's sound never clicks in or out. */
+export const EDGE_S = 0.1;
+
+/** Equal-power fade-in over `len` frames: sin(π/2·x), so two overlapping clips keep a steady combined level. */
+const equalPower = (f: number, len: number) => (len <= 0 ? 1 : Math.sin((Math.PI / 2) * Math.max(0, Math.min(1, f / len))));
+
 /**
  * Clip volume at scene frame f: the scene's own level, lifted to SPEECH_VOLUME while someone talks. A scene
- * set to volume 0 stays muted. The lift also eases in and out at the scene's own edges, so a phrase cut by
- * the edit fades rather than clicks.
+ * set to volume 0 stays muted. Every scene fades in and out at its edges: over the transition it shares with
+ * its neighbour (equal-power, so a crossfade doesn't dip or bump) and never faster than EDGE_S, so a cut
+ * doesn't click; a phrase cut by the edit fades rather than clicks too.
  */
-export function sceneVolume(scene: Pick<VideoScene, "speech" | "trimStart" | "speed" | "volume">, f: number, frames: number, fps: number): number {
-  if (scene.volume <= 0 || !scene.speech?.length) return scene.volume;
+export function sceneVolume(
+  scene: Pick<VideoScene, "speech" | "trimStart" | "speed" | "volume">,
+  f: number,
+  frames: number,
+  fps: number,
+  fade: { in?: number; out?: number } = {},
+): number {
+  if (scene.volume <= 0) return 0;
+  const edge = EDGE_S * fps;
+  const fin = Math.min(frames / 2, Math.max(edge, fade.in ?? 0));
+  const fout = Math.min(frames / 2, Math.max(edge, fade.out ?? 0));
+  const env = equalPower(f, fin) * equalPower(frames - f, fout);
+  if (!scene.speech?.length) return scene.volume * env;
   const ramp = RAMP_S * fps;
-  const p = speechPresence(f, sceneSpeechFrames(scene, frames, fps), ramp) * ease(Math.min(f, frames - f) / ramp);
-  return scene.volume + (Math.max(scene.volume, SPEECH_VOLUME) - scene.volume) * p;
+  const p = speechPresence(f, sceneSpeechFrames(scene, frames, fps), ramp);
+  return (scene.volume + (Math.max(scene.volume, SPEECH_VOLUME) - scene.volume) * p) * env;
 }
 
 /** First frame of each timeline sequence (intro, scenes, outro), matching the TransitionSeries layout. */

@@ -6,7 +6,7 @@ import { STYLES, STYLE_IDS, type StyleId } from "../shared/styles";
 import { occasionProfile } from "../shared/occasions";
 import type { Analysis } from "./analyze";
 import { analysisSummary, contactSheets, THEME_RULES, themeProblems } from "./brief";
-import { ThemeInput } from "./planner";
+import { bestWindow, CLEAN_MIN, detailRefOf, establishingScore, faceAt, groupScore, photoDetailRef, photoQuality, PHOTO_MIN, STAMPED, ThemeInput } from "./planner";
 
 /**
  * The website's own theme writer: the same brief Claude gets in chat (stats, contact sheets,
@@ -73,37 +73,57 @@ export async function proposeWithClaude(a: Analysis, dir: string): Promise<Propo
   throw new Error("Claude's themes broke the rules twice");
 }
 
-const mean = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
-
 /**
  * Themes without Claude: the occasion's best styles over three different arcs through the
  * strongest material. Plainer than Claude's, but every option still opens, peaks and closes on
- * real footage.
+ * real footage. Moments are scored exactly as the planner scores them (quality, folder-relative
+ * sharpness, stamped files), so a blurred swing, a ceiling or a map-stamped clip is never an anchor.
  */
 export function autoThemes(a: Analysis): Proposal {
   const profile = occasionProfile(a.occasion);
   const styles: StyleId[] = [...new Set([...profile.styles, ...STYLE_IDS.filter((s) => !profile.avoid.includes(s))])].slice(0, 3);
-  type Item = { id: string; label: string; start?: number; calm: number; peak: number };
-  const items: Item[] = [
-    ...a.clips.map((c) => {
-      const q = c.quality?.length ? mean(c.quality) : 1;
-      const best = c.highlights[0];
-      return { id: c.id, label: c.name, start: best?.start, calm: q * (1 - mean(c.motion)), peak: q * (mean(c.energy) + mean(c.motion)) };
-    }),
-    ...a.photos.map((p) => ({ id: p.id, label: p.name, calm: 0.5, peak: 0.2 })),
-  ];
-  if (!items.length) throw new Error("The folder has no usable clips or photos");
-  const byCalm = [...items].sort((x, y) => y.calm - x.calm);
-  const byPeak = [...items].sort((x, y) => y.peak - x.peak);
-  const pick = (list: Item[], skip: string[]) => list.find((i) => !skip.includes(i.id)) ?? list[0];
+  if (!a.clips.length && !a.photos.length) throw new Error("The folder has no usable clips or photos");
+  const detailRef = detailRefOf(a.clips);
+  const photoRef = photoDetailRef(a.photos, detailRef);
+  /** establish: wide sharp venue shot; group: how many faces (a group photo). */
+  type Item = { id: string; label: string; start?: number; calm: number; peak: number; clean: boolean; establish: number; group: number; long: boolean };
   const title = a.occasion.length <= 60 ? a.occasion : a.occasion.slice(0, 57) + "…";
 
   const themes = styles.map((styleId, k): ThemeInput => {
     const style = STYLES[styleId];
-    // Each theme rotates which strong shot opens and which closes, so the three arcs differ.
-    const opener = byCalm[k % byCalm.length];
+    const len = style.shotLength + style.transition.duration;
+    const items: Item[] = [
+      ...a.clips.map((c): Item => {
+        const calm = bestWindow(c, len, { ...style, prefer: "calm" }, detailRef);
+        const peak = bestWindow(c, len, { ...style, prefer: "energy" }, detailRef);
+        const clean = !STAMPED.test(c.name) && (calm?.clean ?? 0) >= CLEAN_MIN && (peak?.clean ?? 0) >= CLEAN_MIN;
+        const at = (style.prefer === "calm" ? calm : peak)?.start;
+        const face = at !== undefined ? faceAt(c, at + len / 2) : undefined;
+        const ds = (c.detail ?? []).filter((x) => Number.isFinite(x));
+        const detail = ds.length ? ds.reduce((x, y) => x + y, 0) / ds.length : detailRef;
+        const establish = establishingScore({ detail, detailRef, faces: face, landscape: c.orientation === "landscape", clean: calm?.clean ?? 0 });
+        return { id: c.id, label: c.name, start: at, calm: calm?.score ?? 0, peak: peak?.score ?? 0, clean, establish, group: groupScore(face, calm?.clean ?? 0) * 0.8, long: c.duration >= 4 };
+      }),
+      ...a.photos.map((p): Item => {
+        const q = photoQuality(p, photoRef);
+        const establish = establishingScore({ detail: p.detail ?? photoRef, detailRef: photoRef, faces: p.faces, landscape: p.width > p.height, clean: q }) * 0.8;
+        return { id: p.id, label: p.name, calm: 0.5 * q, peak: 0.2 * q, clean: q >= PHOTO_MIN && !STAMPED.test(p.name), establish, group: groupScore(p.faces, q), long: true };
+      }),
+    ];
+    // Only clean material anchors a theme, unless the folder has nothing clean at all.
+    const pool = items.some((i) => i.clean) ? items.filter((i) => i.clean) : items;
+    const byCalm = [...pool].sort((x, y) => y.calm - x.calm);
+    const byPeak = [...pool].sort((x, y) => y.peak - x.peak);
+    const pick = (list: Item[], skip: string[]) => list.find((i) => !skip.includes(i.id)) ?? list[0];
+    // Story shape: open on the venue (widest sharp establishing shot), peak on the strongest crowd moment,
+    // close on the biggest group shot. Each theme takes the k-th best opener so the arcs still differ.
+    // The strongest moment is kept for the peak, never spent on the opening.
+    const top = byPeak[0];
+    const byEstablish = [...pool].filter((i) => i.long && (pool.length < 2 || i.id !== top.id)).sort((x, y) => y.establish - x.establish);
+    const opener = byEstablish[k % Math.max(1, Math.min(3, byEstablish.length))] ?? byCalm[k % byCalm.length];
     const peak = pick(byPeak, [opener.id]);
-    const closer = pick([...byCalm.slice((k + 1) % byCalm.length), ...byCalm], [opener.id, peak.id]);
+    const byGroup = [...pool].sort((x, y) => y.group - x.group);
+    const closer = (byGroup[0]?.group ?? 0) > 0 ? pick(byGroup, [opener.id, peak.id]) : pick([...byCalm.slice((k + 1) % byCalm.length), ...byCalm], [opener.id, peak.id]);
     const shot = (i: Item) => ({ id: i.id, ...(i.start !== undefined ? { start: i.start } : {}) });
     return {
       name: `${style.name} cut`,
@@ -112,7 +132,7 @@ export function autoThemes(a: Analysis): Proposal {
       occasionFit: `${profile.tone}`.slice(0, 200).padEnd(10, "."),
       styleId,
       title,
-      outroText: profile.id === "memorial" ? "Forever remembered" : "Thanks for watching",
+      outroText: profile.id === "memorial" ? "Forever remembered" : "Until next time",
       shots: [shot(opener), shot(peak), shot(closer)],
     };
   });

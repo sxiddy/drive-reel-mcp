@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Archivo, IBM_Plex_Mono, Newsreader } from "next/font/google";
 import "./globals.css";
+// Starts the storage sweep (old footage and expired videos) with the server.
+import "@/src/lib/retention";
 
 // Three departments: condensed grotesk for the poster, serif for the script, mono for the camera report.
 const archivo = Archivo({ subsets: ["latin"], axes: ["wdth"], variable: "--font-archivo" });
