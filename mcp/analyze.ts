@@ -1,9 +1,30 @@
 import fs from "node:fs";
 import path from "node:path";
 import { downloadFile, listSource, mediaKind, parseSource, type RemoteFile } from "./drive";
-import { audioEnergy, contactSheet, dHash, frameStats, hamming, isHdr, makeAudioProxy, makeImageProxy, makeVideoProxy, photoSheet, probe, type FrameStat } from "./media";
+import {
+  audioEnergy,
+  colorOf,
+  colorOfFrame,
+  contactSheet,
+  dHash,
+  frameStats,
+  hamming,
+  imageColor,
+  isHdr,
+  makeAudioProxy,
+  makeImageProxy,
+  makeVideoProxy,
+  photoSheet,
+  probe,
+  speechWindows,
+  type ColorStat,
+  type FrameStat,
+} from "./media";
 import { detectBeats } from "./beats";
-import type { AspectRatio } from "../shared/plan";
+import { isTranscriberAvailable, transcribe } from "./transcribe";
+import type { AspectRatio, CaptionCue } from "../shared/plan";
+
+export type { ColorStat } from "./media";
 
 export type ClipInfo = {
   id: string;
@@ -36,9 +57,17 @@ export type ClipInfo = {
   sampled?: { sourceDuration: number; segments: { sourceStart: number; proxyStart: number; length: number }[] };
   /** What Claude saw in the contact sheet (saved by propose_themes). */
   notes?: string;
+  /** Typical colour of the clip (median of its samples), for matching colour between phones. */
+  color?: ColorStat;
+  /** The same per half-second, so a shot's grade is based on the moment actually used. */
+  colorTrack?: { luma: number[]; u: number[]; v: number[]; sat: number[] };
+  /** Where someone is talking, [start, end] seconds. */
+  speech?: [number, number][];
+  /** Subtitle cues for that speech, when a speech-to-text engine is set up (see transcribe.ts). */
+  transcript?: CaptionCue[];
 };
 
-export type PhotoInfo = { id: string; kind: "image"; name: string; folder: string; width: number; height: number; proxy: string; notes?: string };
+export type PhotoInfo = { id: string; kind: "image"; name: string; folder: string; width: number; height: number; proxy: string; notes?: string; color?: ColorStat };
 /** bpm/beatOffset come from beat detection, so cuts land on this song's beat. */
 export type AudioInfo = { id: string; kind: "audio"; name: string; duration: number; proxy: string; bpm?: number; beatOffset?: number };
 
@@ -165,6 +194,58 @@ function highlightsFor(energy: number[], motion: number[], quality: number[], cu
   return picked;
 }
 
+/** Everything measured from a clip's proxy (all times in proxy seconds). */
+export type ClipMeasures = Pick<ClipInfo, "energy" | "motion" | "quality" | "cuts" | "highlights" | "audioLevel" | "color" | "colorTrack" | "speech" | "transcript">;
+
+/**
+ * Watches and listens to a proxy: loudness, motion, usability, internal cuts and best moments; colour from
+ * the same frame-stats pass; speech windows from the audio; and subtitles when a transcriber is available.
+ */
+export async function measureVideoProxy(file: string, duration: number, hasAudio: boolean, sampled?: ClipInfo["sampled"]): Promise<ClipMeasures> {
+  const [rms, stats, speech] = await Promise.all([
+    hasAudio ? audioEnergy(file) : Promise.resolve([] as number[]),
+    frameStats(file),
+    hasAudio ? speechWindows(file).catch(() => [] as [number, number][]) : Promise.resolve([] as [number, number][]),
+  ]);
+  const buckets = Math.max(1, Math.ceil(duration / 0.5));
+  const rmsPadded = Array.from({ length: buckets }, (_, k) => rms[k] ?? -90);
+  const energy = normalize(rmsPadded.map((db) => Math.max(0, (db + 60) / 60)));
+  const motion = normalize(bucket(stats, duration, (s) => s.score));
+  const quality = qualityOf(stats, duration);
+  const joins = sampled?.segments.slice(1).map((g) => g.proxyStart) ?? [];
+  const detected = stats.filter((s) => s.t > 0.3 && s.score > 0.4).map((s) => round2(s.t));
+  const cuts = [...new Set([...detected, ...joins])].sort((a, b) => a - b);
+  const avgDb = rms.length ? rms.reduce((a, b) => a + b, 0) / rms.length : -90;
+  const colors = stats.map((s) => ({ t: s.t, ...colorOfFrame(s) }));
+  const track = (k: keyof ColorStat) => bucket(stats, duration, (s) => colorOfFrame(s)[k], NaN).map(round3);
+  let transcript: CaptionCue[] | undefined;
+  if (speech.length && isTranscriberAvailable()) {
+    transcript = await transcribe(file).catch(() => undefined);
+  }
+  return {
+    energy: energy.map(round2),
+    motion: motion.map(round2),
+    quality: quality.map(round2),
+    cuts,
+    highlights: highlightsFor(energy, motion, quality, cuts, duration),
+    audioLevel: avgDb < -55 ? "silent" : avgDb < -35 ? "quiet" : avgDb < -20 ? "lively" : "loud",
+    color: colors.length ? colorOf(colors) : undefined,
+    colorTrack: colors.length ? fillGaps({ luma: track("luma"), u: track("u"), v: track("v"), sat: track("sat") }) : undefined,
+    speech,
+    transcript: transcript?.length ? transcript : undefined,
+  };
+}
+
+/** Half-seconds with no sample (a stall in the stats) take their neighbour's value, so the JSON stays numeric. */
+function fillGaps<T extends Record<string, number[]>>(t: T): T {
+  for (const xs of Object.values(t)) {
+    for (let i = 0; i < xs.length; i++) if (!Number.isFinite(xs[i])) xs[i] = xs[i - 1] ?? xs.find(Number.isFinite) ?? 0;
+  }
+  return t;
+}
+
+const round3 = (x: number) => Math.round(x * 1000) / 1000;
+
 export async function analyzeSource(opts: {
   projectId: string;
   projectDir: string;
@@ -232,7 +313,9 @@ export async function analyzeSource(opts: {
         const id = `p${i + 1}`;
         const proxy = `assets/${id}.jpg`;
         await makeImageProxy(dl.path, path.join(projectDir, proxy));
-        photos.push({ id, kind: "image", name: dl.name, folder: f.folder, width: p.width, height: p.height, proxy });
+        // One signalstats frame: cheap, and lets photos join the colour match.
+        const color = await imageColor(path.join(projectDir, proxy)).catch(() => undefined);
+        photos.push({ id, kind: "image", name: dl.name, folder: f.folder, width: p.width, height: p.height, proxy, color });
       } else if (kind === "audio" || (kind === "video" && !p.hasVideo && p.hasAudio)) {
         const id = `a${i + 1}`;
         const proxy = `assets/${id}.m4a`;
@@ -261,18 +344,9 @@ export async function analyzeSource(opts: {
         const pp = await probe(path.join(projectDir, proxy));
         const duration = pp.duration || p.duration;
         tick(`Watching ${dl.name} (${i + 1}/${media.length})`);
-        const [rms, stats] = await Promise.all([pp.hasAudio ? audioEnergy(path.join(projectDir, proxy)) : Promise.resolve([] as number[]), frameStats(path.join(projectDir, proxy))]);
+        const m = await measureVideoProxy(path.join(projectDir, proxy), duration, pp.hasAudio, sampled);
         const sheet = `sheets/${id}.jpg`;
         await contactSheet(path.join(projectDir, proxy), duration, path.join(projectDir, sheet));
-        const buckets = Math.max(1, Math.ceil(duration / 0.5));
-        const rmsPadded = Array.from({ length: buckets }, (_, k) => rms[k] ?? -90);
-        const energy = normalize(rmsPadded.map((db) => Math.max(0, (db + 60) / 60)));
-        const motion = normalize(bucket(stats, duration, (s) => s.score));
-        const quality = qualityOf(stats, duration);
-        const joins = sampled?.segments.slice(1).map((g) => g.proxyStart) ?? [];
-        const detected = stats.filter((s) => s.t > 0.3 && s.score > 0.4).map((s) => round2(s.t));
-        const cuts = [...new Set([...detected, ...joins])].sort((a, b) => a - b);
-        const avgDb = rms.length ? rms.reduce((a, b) => a + b, 0) / rms.length : -90;
         const orientation = pp.width > pp.height * 1.05 ? "landscape" : pp.height > pp.width * 1.05 ? "portrait" : "square";
         clips.push({
           id,
@@ -287,12 +361,7 @@ export async function analyzeSource(opts: {
           proxy,
           sheet,
           sheetTimes: Array.from({ length: 8 }, (_, k) => round2((k * duration) / 8)),
-          energy: energy.map(round2),
-          motion: motion.map(round2),
-          quality: quality.map(round2),
-          cuts,
-          highlights: highlightsFor(energy, motion, quality, cuts, duration),
-          audioLevel: avgDb < -55 ? "silent" : avgDb < -35 ? "quiet" : avgDb < -20 ? "lively" : "loud",
+          ...m,
           hdr: isHdr(p) || undefined,
           sampled,
         });

@@ -18,7 +18,8 @@ import {
   type VideoScene,
 } from "../shared/plan";
 import { CardView, MotionIntro, MotionOutro } from "./cards";
-import { AnimatedHeading, BodyText, Caption, Graded, Overlays, makeLook, textShadow, type Look } from "./components";
+import { AnimatedHeading, BodyText, Caption, Graded, Overlays, Subtitles, makeLook, textShadow, useCorrection, type Look } from "./components";
+import { musicDuck, sceneVolume, speechTimeline } from "./audio";
 import { MotionField } from "./motion";
 
 const SLIDE_DIRS = ["from-right", "from-bottom", "from-left", "from-top"] as const;
@@ -65,6 +66,12 @@ const VideoView: React.FC<{ scene: VideoScene; plan: EditPlan; look: Look; frame
       : interpolate(frame, [0, frames], [1.0, 1.07]);
   const src = resolveAsset(plan, scene.src);
   const trimBefore = Math.round(scene.trimStart * fps);
+  const corr = useCorrection(scene.grade);
+  // The clip's own sound: its set level, lifted while someone talks (the music ducks under it, see Music).
+  const volume = (f: number) => sceneVolume(scene, f, frames, fps);
+  const words = scene.captions?.length ? (
+    <Subtitles cues={scene.captions} look={look} trimStart={scene.trimStart} speed={scene.speed} durationInFrames={frames} aboveCaption={!!scene.caption} />
+  ) : null;
 
   if (needsContainedFit(scene, width, height)) {
     // Contain the clip over a blurred, darkened, scaled-up copy of itself (the same treatment photos get).
@@ -75,10 +82,11 @@ const VideoView: React.FC<{ scene: VideoScene; plan: EditPlan; look: Look; frame
     const fgScale = 1 + (scale - 1) * 0.6;
     return (
       <AbsoluteFill style={{ backgroundColor: "#000" }}>
-        <AbsoluteFill style={{ filter: `blur(${look.unit * 0.035}px) brightness(0.5) saturate(1.15)`, transform: `scale(${1.25 + (scale - 1) * 0.5})` }}>
+        {corr.defs}
+        <AbsoluteFill style={{ filter: `${corr.filter} blur(${look.unit * 0.035}px) brightness(0.5) saturate(1.15)`, transform: `scale(${1.25 + (scale - 1) * 0.5})` }}>
           <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} muted pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </AbsoluteFill>
-        <Graded look={look}>
+        <Graded look={look} correction={corr.filter}>
           <AbsoluteFill style={{ justifyContent: "center", alignItems: "center" }}>
             <div
               style={{
@@ -89,23 +97,26 @@ const VideoView: React.FC<{ scene: VideoScene; plan: EditPlan; look: Look; frame
                 overflow: "hidden",
               }}
             >
-              <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={scene.volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
             </div>
           </AbsoluteFill>
         </Graded>
         {scene.caption ? <Caption text={scene.caption} look={look} durationInFrames={frames} /> : null}
+        {words}
       </AbsoluteFill>
     );
   }
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
-      <Graded look={look}>
+      {corr.defs}
+      <Graded look={look} correction={corr.filter}>
         <AbsoluteFill style={{ transform: `scale(${scale})` }}>
-          <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={scene.volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+          <OffthreadVideo src={src} trimBefore={trimBefore} playbackRate={scene.speed} volume={volume} pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         </AbsoluteFill>
       </Graded>
       {scene.caption ? <Caption text={scene.caption} look={look} durationInFrames={frames} /> : null}
+      {words}
     </AbsoluteFill>
   );
 };
@@ -116,11 +127,13 @@ const ImageView: React.FC<{ scene: ImageScene; plan: EditPlan; look: Look; frame
   const m = scene.motion;
   const scale = m === "zoomOut" ? 1.18 - p * 0.13 : m === "zoomIn" ? 1.05 + p * 0.13 : 1.15;
   const tx = m === "panLeft" ? 4 - p * 8 : m === "panRight" ? -4 + p * 8 : 0;
+  const corr = useCorrection(scene.grade);
   return (
     <AbsoluteFill style={{ backgroundColor: "#000" }}>
+      {corr.defs}
       {/* Blurred fill behind the photo so portrait photos work in landscape frames and vice versa. */}
-      <Img src={resolveAsset(plan, scene.src)} style={{ position: "absolute", width: "100%", height: "100%", objectFit: "cover", filter: "blur(40px) brightness(0.6)", transform: "scale(1.2)" }} />
-      <Graded look={look}>
+      <Img src={resolveAsset(plan, scene.src)} style={{ position: "absolute", width: "100%", height: "100%", objectFit: "cover", filter: `${corr.filter} blur(40px) brightness(0.6)`, transform: "scale(1.2)" }} />
+      <Graded look={look} correction={corr.filter}>
         <AbsoluteFill style={{ transform: `scale(${scale}) translateX(${tx}%)` }}>
           <Img src={resolveAsset(plan, scene.src)} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
         </AbsoluteFill>
@@ -166,9 +179,11 @@ const IntroView: React.FC<{ plan: EditPlan; look: Look; backdrop: Backdrop; fram
   const elegant = look.style.id === "elegant";
   const over = elegant ? "flat" : "footage";
   const b = backdrop.scene;
+  const corr = useCorrection(b.grade);
   return (
     <AbsoluteFill>
-      <AbsoluteFill style={{ filter: "blur(6px) brightness(0.45)", transform: `scale(${1.08 + (frame / frames) * 0.04})` }}>
+      {corr.defs}
+      <AbsoluteFill style={{ filter: `${corr.filter} blur(6px) brightness(0.45)`, transform: `scale(${1.08 + (frame / frames) * 0.04})` }}>
         {b.kind === "video" ? (
           <OffthreadVideo src={resolveAsset(plan, b.src)} trimBefore={Math.round(backdrop.trimStart * fps)} muted pauseWhenBuffering style={{ width: "100%", height: "100%", objectFit: "cover" }} />
         ) : (
@@ -221,12 +236,15 @@ const Music: React.FC<{ plan: EditPlan; total: number }> = ({ plan, total }) => 
   const { fps } = useVideoConfig();
   const music = plan.music!;
   const src = resolveAsset(plan, music.src);
+  // Down by DUCK_DB wherever a clip's speech is lifted, with short ramps either side.
+  const talk = React.useMemo(() => speechTimeline(plan), [plan]);
   const fadeIn = Math.max(1, Math.min(fps * 0.5, Math.floor(total / 4)));
   const fadeOut = Math.max(1, Math.min(fps * 2, Math.floor(total / 4)));
   const envelope = (globalFrame: number) =>
-    total < 8
+    musicDuck(globalFrame, talk, fps) *
+    (total < 8
       ? music.volume
-      : music.volume * interpolate(globalFrame, [0, fadeIn, total - fadeOut, total], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+      : music.volume * interpolate(globalFrame, [0, fadeIn, total - fadeOut, total], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }));
 
   if (!music.duration) return <Audio src={src} loop volume={envelope} />;
   const track = Math.floor(music.duration * fps);

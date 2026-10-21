@@ -11,8 +11,7 @@ import { activeJobFor, getJob, startJob, waitForJob, type Job } from "./jobs";
 import { buildPlan, ThemeInput, type Theme } from "./planner";
 import { ROOT, createProject, loadAnalysis, loadProject, projectDir, saveProject } from "./projects";
 import { siteUrl } from "./publish";
-import { occasionProfile } from "../shared/occasions";
-import { renderPreviewStill } from "../render/render";
+import { analysisSummary, applyClipNotes, contactSheets, renderThemePreviews, THEME_RULES, themeProblems } from "./brief";
 
 // Stdout carries the MCP protocol; anything else must go to stderr.
 console.log = console.error;
@@ -29,82 +28,19 @@ const WAIT_MS = 50_000;
 /** Contact sheets returned inline per call; the rest are available through view_clips. */
 const SHEETS_PER_CALL = 12;
 
-const styleCatalog = () =>
-  STYLE_IDS.map((id) => {
-    const s = STYLES[id];
-    return `- ${id} ("${s.name}"): ${s.feel} Best for: ${s.bestFor}. ~${s.shotLength}s shots, ${s.music.bpm} BPM.`;
-  }).join("\n");
-
-const avg = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-function occasionBrief(occasion: string) {
-  const o = occasionProfile(occasion);
-  return [
-    `OCCASION: "${occasion}" reads as ${o.label}.`,
-    `- Build most themes on: ${o.styles.join(", ")}${o.avoid.length ? `; avoid: ${o.avoid.join(", ")}` : ""}.`,
-    `- Tone: ${o.tone}`,
-    `- Caption ideas: ${o.captionIdeas}.`,
-    "- Say in each theme's occasionFit why it suits this occasion. If the folder suggests the occasion is something else, tell the user.",
-  ].join("\n");
-}
-
-const fmtMin = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
-
-/** "dark or blurry from 12–15s" so Claude doesn't pick those moments by hand. */
-function qualityNote(c: Analysis["clips"][number]) {
-  if (!c.quality?.length) return "";
-  const bad: [number, number][] = [];
-  c.quality.forEach((q, i) => {
-    if (q >= 0.4) return;
-    const last = bad[bad.length - 1];
-    if (last && last[1] === i * 0.5) last[1] = (i + 1) * 0.5;
-    else bad.push([i * 0.5, (i + 1) * 0.5]);
-  });
-  if (!bad.length) return "";
-  const share = Math.round((100 * bad.reduce((n, [a, b]) => n + b - a, 0)) / Math.max(0.5, c.duration));
-  return ` · dark/blurry ${share}% (${bad.slice(0, 3).map(([a, b]) => `${a}–${b}s`).join(", ")})`;
-}
-
 function describeAnalysis(a: Analysis): Content[] {
-  const lines = [
-    `Project ${a.projectId} is ready. Occasion: "${a.occasion}". Target length: ${a.targetDuration}s. Suggested frame: ${a.suggestedAspect}.`,
-    `Found ${a.clips.length} video clips (${Math.round(a.totals.footageSeconds)}s of footage), ${a.photos.length} photos, ${a.audio.length} audio tracks.`,
-    a.skipped.length ? `Skipped: ${a.skipped.slice(0, 8).map((s) => `${s.name} (${s.reason})`).join("; ")}${a.skipped.length > 8 ? ` …and ${a.skipped.length - 8} more` : ""}` : "",
-    "",
-    "CLIPS (energy = loudness, motion = visual movement, both 0–1 relative to the folder; highlights = best windows in seconds):",
-    ...a.clips.map(
-      (c) =>
-        `- ${c.id} · ${c.folder ? c.folder + "/" : ""}${c.name} · ${c.duration}s · ${c.orientation} · audio ${c.audioLevel} · energy ${avg(c.energy).toFixed(2)} · motion ${avg(c.motion).toFixed(2)}` +
-        `${c.cuts.length ? ` · internal cuts at ${c.cuts.slice(0, 6).join(", ")}s` : ""} · highlights ${c.highlights.map((h) => `${h.start}–${h.end}s`).join(", ")}` +
-        qualityNote(c) +
-        (c.hdr ? " · HDR (tonemapped)" : "") +
-        (c.sampled ? ` · long recording (${Math.round(c.sampled.sourceDuration / 60)} min), sampled as ${c.sampled.segments.length} segments from ${c.sampled.segments.map((g) => fmtMin(g.sourceStart)).join(", ")}` : ""),
-    ),
-    a.photos.length ? `\nPHOTOS: ${a.photos.map((p) => `${p.id} (${p.folder ? p.folder + "/" : ""}${p.name}, ${p.width > p.height ? "landscape" : "portrait"})`).join(", ")}` : "",
-    a.audio.length ? `\nAUDIO: ${a.audio.map((t) => `${t.id} "${t.name}" ${t.duration}s${t.bpm ? `, ${t.bpm} BPM` : ""}`).join(", ")} (used as the soundtrack unless a theme says otherwise; cuts follow its detected beat)` : "",
-    "",
-    "STYLES you can build themes on:",
-    styleCatalog(),
-    "",
-    occasionBrief(a.occasion),
+  const intro = [
+    analysisSummary(a),
     "",
     "NEXT: Look at the contact sheets below (each is 8 frames across the clip, left→right, top→bottom; frame times are listed in its label).",
-    "Work out what each clip shows (people, stage, crowd, venue, mood, time of day). Then call propose_themes with:",
-    "- clip_notes: one short line per clip/photo saying what's in it (shown to the user in the website's media bin);",
-    "- 3–4 themes that tell DIFFERENT stories with this footage: each names real moments in its pitch, has a one-line story arc, and a curated shot list (3+ shots: the opener, the peak, the closer, with start times read off the sheet timestamps and captions where they help). The planner fills the gaps between your shots on the music's beat.",
-    "Use view_clips for any sheet not shown here.",
-  ];
-  const content: Content[] = [text(lines.filter((l) => l !== undefined).join("\n"))];
-  const dir = projectDir(a.projectId);
-  for (const c of a.clips.slice(0, SHEETS_PER_CALL)) {
-    content.push(text(`${c.id} (${c.name}) — frames at ${c.sheetTimes.join("s, ")}s`));
-    content.push(image(path.join(dir, c.sheet)));
-  }
-  if (a.photoSheet) {
-    content.push(text(`Photos, left→right, top→bottom: ${a.photos.slice(0, 16).map((p) => p.id).join(", ")}`));
-    content.push(image(path.join(dir, a.photoSheet)));
-  }
+    THEME_RULES,
+    "Then call propose_themes. Use view_clips for any sheet not shown here.",
+  ].join("\n");
+  const content: Content[] = [text(intro)];
+  for (const s of contactSheets(a, projectDir(a.projectId), SHEETS_PER_CALL)) content.push(text(s.label), image(s.file));
   return content;
 }
+
 
 function describeGenerated(r: GenerateResult): Content[] {
   const lines = [
@@ -130,6 +66,8 @@ function describeJob(job: Job | undefined): ReturnType<typeof reply> {
   return reply(describeGenerated(job.result as GenerateResult));
 }
 
+/** One server per connection: stdio has one, the HTTP endpoint makes one per request. Jobs are shared. */
+export function createServer() {
 const server = new McpServer(
   { name: "drive-reel", version: "1.0.0" },
   {
@@ -218,54 +156,24 @@ server.registerTool(
     const project = loadProject(project_id);
     const analysis = project.mode === "drive" ? loadAnalysis(project_id) : null;
     if (!analysis) return reply([text("propose_themes is for Drive projects. For a footage-free video use create_motion_graphics_video.")], true);
-    const ids = new Set([...analysis.clips.map((c) => c.id), ...analysis.photos.map((p) => p.id)]);
-    const problems = themes.flatMap((t, i) => t.shots.filter((s) => !ids.has(s.id)).map((s) => `theme ${i + 1}: unknown shot id ${s.id}`));
-    if (problems.length) return reply([text(`Fix these and call again: ${problems.join("; ")}`)], true);
-    if (new Set(themes.map((t) => t.styleId)).size < Math.min(3, themes.length)) {
-      return reply([text("Use at least three different styleIds so the options feel distinct.")], true);
-    }
-    const arcs = themes.map((t) => t.shots.map((s) => s.id).join(","));
-    if (new Set(arcs).size < themes.length || new Set(themes.map((t) => t.shots[0].id + "|" + t.shots[t.shots.length - 1].id)).size < themes.length) {
-      return reply([text("Two themes open and close on the same shots. Give each theme its own story: a different opener or closer, and a different order of moments.")], true);
-    }
-
-    if (clip_notes) {
-      for (const c of analysis.clips) if (clip_notes[c.id]) c.notes = clip_notes[c.id];
-      for (const p of analysis.photos) if (clip_notes[p.id]) p.notes = clip_notes[p.id];
-      fs.writeFileSync(path.join(projectDir(project_id), "analysis.json"), JSON.stringify(analysis, null, 2));
-    }
-    const profile = occasionProfile(analysis.occasion);
-    const clashing = themes.filter((t) => profile.avoid.includes(t.styleId));
-    if (clashing.length > 1 || !themes.some((t) => profile.styles.includes(t.styleId))) {
-      return reply(
-        [text(`These styles don't suit ${profile.label}. Build most themes on ${profile.styles.join(", ")}${profile.avoid.length ? ` and avoid ${profile.avoid.join(", ")}` : ""}, then call again.`)],
-        true,
-      );
-    }
+    const problem = themeProblems(analysis, themes);
+    if (problem) return reply([text(`${problem} Then call again.`)], true);
+    applyClipNotes(analysis, projectDir(project_id), clip_notes);
     const saved: Theme[] = themes.map((t, i) => ({ ...t, id: `t${i + 1}` }));
     project.themes = saved;
     saveProject(project);
 
-    // One still per theme (its title card over its footage, in its style) so the user can choose by eye.
+    const stills = await renderThemePreviews(analysis, projectDir(project_id), saved, 40_000);
     const content: Content[] = [text(`Saved ${saved.length} themes for ${project_id}. Show the user each option with its preview and ask which to make:`)];
-    const startedAt = Date.now();
     for (const t of saved) {
       const { plan } = buildPlan(analysis, t);
       const beat = plan.music ? ` · cuts on the beat at ${plan.music.bpm} BPM` : "";
       content.push(
         text(
-          `**${t.id} · ${t.name}** (${STYLES[t.styleId].name}, ${plan.aspect})\n${t.pitch}\nStory: ${t.story}\nFits the occasion: ${t.occasionFit}\nTitle: "${t.title}"${t.subtitle ? ` / "${t.subtitle}"` : ""} · Ends with: "${t.outroText}" · ${plan.scenes.length} shots (${t.shots.length} hand-picked)${beat}`,
+          `**${t.id} · ${t.name}** (${STYLES[t.styleId].name}, ${plan.aspect})\n${t.pitch}\nStory: ${t.story}\nFits the occasion: ${t.occasionFit}\nTitle:"${t.title}"${t.subtitle ? ` / "${t.subtitle}"` : ""} · Ends with: "${t.outroText}" · ${plan.scenes.length} shots (${t.shots.length} hand-picked)${beat}`,
         ),
       );
-      if (Date.now() - startedAt > 40_000) continue; // keep the tool call responsive
-      const still = path.join(projectDir(project_id), "previews", `${t.id}.jpg`);
-      try {
-        fs.mkdirSync(path.dirname(still), { recursive: true });
-        await renderPreviewStill({ plan: { ...plan, music: null }, assetDir: projectDir(project_id), outFile: still });
-        content.push(image(still));
-      } catch (e) {
-        console.error(`preview for ${t.id} failed:`, e);
-      }
+      if (stills[t.id]) content.push(image(stills[t.id]));
     }
     return reply(content);
   },
@@ -399,7 +307,15 @@ server.registerPrompt(
   }),
 );
 
-await server.connect(new StdioServerTransport());
-console.error(`drive-reel MCP server ready (site: ${siteUrl()})`);
+return server;
+}
+
+if (process.argv.includes("--http")) {
+  const { serveHttp } = await import("./http");
+  serveHttp(createServer);
+} else {
+  await createServer().connect(new StdioServerTransport());
+  console.error(`drive-reel MCP server ready (site: ${siteUrl()})`);
+}
 
 export { getJob };

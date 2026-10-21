@@ -141,10 +141,19 @@ export type RenderOptions = {
   onProgress?: (fraction: number) => void;
   /** Normalise the soundtrack to -14 LUFS / -1.5 dBTP after rendering (default true). */
   normalizeAudio?: boolean;
+  /**
+   * Output size multiplier (Remotion's `scale`): 2 turns a 1920x1080 composition into a 3840x2160 (4K) file.
+   * Text, cards and graphics are drawn at the higher resolution; footage is scaled up from its source.
+   */
+  scale?: number;
 };
 
+/** Scales the renderer accepts: 1 (the composition size) up to 2 (4K for a 1080p composition). */
+export const RENDER_SCALES = [1, 2] as const;
+
 /** Renders a plan to MP4 (and optionally a poster JPEG). Assets are served from a temporary local server. */
-export async function renderPlan({ plan, assetDir, outFile, posterFile, onProgress, normalizeAudio = true }: RenderOptions) {
+export async function renderPlan({ plan, assetDir, outFile, posterFile, onProgress, normalizeAudio = true, scale = 1 }: RenderOptions) {
+  if (!(RENDER_SCALES as readonly number[]).includes(scale)) throw new Error(`unsupported render scale ${scale}`);
   const serveUrl = await getBundle();
   const server = await serveDirectory(assetDir);
   try {
@@ -154,7 +163,9 @@ export async function renderPlan({ plan, assetDir, outFile, posterFile, onProgre
     activeRenders++;
     try {
       // Under heavy parallel load Remotion's frame extractor occasionally reports "No frame found" for a
-      // frame that exists; a second attempt (fresh port, fresh compositor) gets through.
+      // frame that exists (more often when a clip is drawn twice, as the blurred fill behind a contained
+      // clip is in 9:16 and 1:1). Each retry gets a fresh port and compositor and half the browser tabs.
+      const baseConcurrency = Math.max(1, Math.floor(os.cpus().length / (scale > 1 ? 4 : 2) / activeRenders));
       for (let attempt = 1; ; attempt++) {
         try {
           await onFreePort((port) =>
@@ -167,9 +178,11 @@ export async function renderPlan({ plan, assetDir, outFile, posterFile, onProgre
               outputLocation: outFile,
               crf: 20,
               x264Preset: "veryfast",
+              scale,
               timeoutInMilliseconds: 120_000,
-              // Renders running side by side share the CPU instead of each taking half of it.
-              concurrency: Math.max(1, Math.floor(os.cpus().length / 2 / activeRenders)),
+              // Renders running side by side share the CPU instead of each taking half of it; 4K frames
+              // take four times the memory, so fewer browser tabs run at once.
+              concurrency: Math.max(1, Math.floor(baseConcurrency / 2 ** (attempt - 1))),
               // Leave the last few percent for the loudness pass.
               onProgress: ({ progress }) => onProgress?.(progress * 0.97),
             }),
@@ -177,7 +190,7 @@ export async function renderPlan({ plan, assetDir, outFile, posterFile, onProgre
           break;
         } catch (e) {
           const transient = e instanceof Error && /No frame found|Compositor error|Request closed|ERR_CONNECTION_REFUSED|Target closed/i.test(e.message);
-          if (!transient || attempt >= 2) throw e;
+          if (!transient || attempt >= 3) throw e;
         }
       }
     } finally {
@@ -200,7 +213,7 @@ export async function renderPlan({ plan, assetDir, outFile, posterFile, onProgre
         }),
       );
     }
-    return { durationInFrames: composition.durationInFrames, width: composition.width, height: composition.height };
+    return { durationInFrames: composition.durationInFrames, width: Math.round(composition.width * scale), height: Math.round(composition.height * scale), scale };
   } finally {
     await server.close();
   }

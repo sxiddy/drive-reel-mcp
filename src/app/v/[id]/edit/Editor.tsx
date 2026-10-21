@@ -13,8 +13,13 @@ import { Inspector } from "./Inspector";
 import { MediaBin, TextPanel, type Upload } from "./MediaBin";
 import { Timeline, layoutTimeline } from "./Timeline";
 import { IconButton, Tabs, useLayoutMode } from "./ui";
+import { FormatsMenu, VersionsMenu } from "./DeliveryMenus";
 
-export type RenderView = { status: "idle" | "queued" | "rendering" | "error"; progress: number; error?: string; errorDetails?: string; ahead?: number };
+type Aspect = EditPlan["aspect"];
+export type RenderJobView = { key: string; kind: "version" | "uhd"; n: number; aspect: Aspect; status: "queued" | "rendering"; progress: number; ahead: number };
+export type RenderView = { status: "idle" | "queued" | "rendering" | "error"; progress: number; error?: string; errorDetails?: string; ahead?: number; jobs?: RenderJobView[] };
+/** What the editor's versions list shows about each rendered version. */
+export type EditorVersion = { n: number; aspect?: Aspect; createdAt: string; durationSeconds: number; poster: string; uhd?: unknown; from?: number };
 type Auth = "checking" | "edit" | "view";
 type PanelTab = "edit" | "media" | "text";
 
@@ -76,7 +81,7 @@ export function Editor({
 }: {
   id: string;
   initialPlan: EditPlan;
-  initialVersions: number;
+  initialVersions: EditorVersion[];
   initialRender: RenderView;
   initialMedia: MediaManifest;
 }) {
@@ -85,7 +90,8 @@ export function Editor({
   const [saved, setSaved] = useState<EditPlan>(initialPlan);
   const [selected, setSelected] = useState<number | null>(null);
   const [render, setRender] = useState<RenderView>(initialRender);
-  const [versions, setVersions] = useState(initialVersions);
+  const [versionList, setVersionList] = useState<EditorVersion[]>(initialVersions);
+  const versions = versionList.length;
   const [justRendered, setJustRendered] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -237,8 +243,8 @@ export function Editor({
         setRender(r.render);
         if (r.render.status !== "rendering" && r.render.status !== "queued") {
           if (r.versions.length > versions) setJustRendered(r.versions.at(-1).n);
-          setVersions(r.versions.length);
         }
+        setVersionList(r.versions);
       } catch {
         /* try again on the next tick */
       }
@@ -388,16 +394,24 @@ export function Editor({
     }
   };
 
-  const renderNew = async () => {
+  /** Queues the saved edit as new versions: the plan's own frame, or each of `aspects` (the plan itself isn't changed). */
+  const renderNew = async (aspects?: Aspect[]) => {
     if (readOnly) return;
     if (dirty && !(await save())) return;
     setJustRendered(null);
     setError(null);
     setHideRenderError(false);
     try {
-      const res = await authed(`/api/videos/${id}/render`, { method: "POST" });
-      if (!res.ok) throw new Error(await res.text());
-      setRender(await res.json());
+      for (const aspect of aspects ?? [null]) {
+        const res = await authed(`/api/videos/${id}/render`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(aspect ? { aspect } : {}),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        setRender(await res.json());
+      }
+      if (aspects && aspects.length > 1) setNotice(`${aspects.length} formats queued`);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -470,11 +484,16 @@ export function Editor({
   };
 
   const portrait = plan.aspect === "9:16";
+  const waitingJobs = (render.jobs?.length ?? 0) - 1;
   const exportLabel =
     render.status === "rendering"
-      ? `Rendering ${Math.round(render.progress * 100)}%`
+      ? mode === "narrow"
+        ? `${Math.round(render.progress * 100)}%`
+        : `Rendering ${Math.round(render.progress * 100)}%${waitingJobs > 0 ? ` · +${waitingJobs}` : ""}`
       : render.status === "queued"
-        ? `Queued · ${render.ahead ?? 0} ahead`
+        ? mode === "narrow"
+          ? "Queued"
+          : `Queued · ${render.ahead ?? 0} ahead`
         : mode === "narrow"
           ? "Export"
           : "Export new version";
@@ -524,9 +543,9 @@ export function Editor({
   ];
 
   return (
-    <div className="fixed inset-0 z-40 flex flex-col overflow-hidden bg-[#0c0d10] text-white">
+    <div className="edit-bay fixed inset-0 z-40 flex flex-col overflow-hidden bg-well text-white">
       {/* Top bar */}
-      <header className="flex h-14 shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-[#111216] px-2 sm:gap-2 sm:px-3">
+      <header className="flex h-14 shrink-0 items-center gap-1.5 border-b border-white/[0.06] bg-surface px-2 sm:gap-2 sm:px-3">
         <Link href={`/v/${id}`} aria-label="Back to the video" className="flex shrink-0 items-center gap-1 rounded-lg px-2 py-1.5 text-sm text-white/70 hover:bg-white/10 hover:text-white">
           <Back className="size-4" />
           <span className="hidden sm:inline">Back</span>
@@ -564,14 +583,16 @@ export function Editor({
         <button onClick={reset} disabled={readOnly} className="hidden shrink-0 rounded-lg px-3 py-2 text-sm text-white/60 hover:bg-white/10 hover:text-white disabled:opacity-40 disabled:hover:bg-transparent lg:block">
           Reset to original
         </button>
+        <VersionsMenu id={id} versions={versionList} />
         <button onClick={save} disabled={readOnly || !dirty || busy} className="shrink-0 rounded-lg border border-white/10 px-2.5 py-2 text-sm hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent sm:px-3">
           Save
         </button>
+        <div className="relative flex shrink-0">
         <button
-          onClick={renderNew}
+          onClick={() => renderNew()}
           disabled={readOnly || render.status === "rendering" || render.status === "queued" || busy}
           title={readOnly ? "Open the edit link Claude gave you to export" : undefined}
-          className={`relative flex shrink-0 items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-sm font-semibold transition sm:px-4 ${
+          className={`relative flex shrink-0 items-center gap-2 overflow-hidden rounded-l-lg px-3 py-2 text-sm font-semibold transition sm:px-4 ${
             readOnly ? "cursor-not-allowed bg-white/10 text-white/40" : "bg-brand text-ink hover:brightness-110 disabled:cursor-wait"
           }`}
         >
@@ -580,6 +601,8 @@ export function Editor({
           <Sparkle className="relative size-4 shrink-0" />
           <span className="relative whitespace-nowrap">{exportLabel}</span>
         </button>
+        <FormatsMenu current={plan.aspect} readOnly={readOnly} busy={busy} jobs={render.jobs ?? []} onExport={(a) => renderNew(a)} />
+        </div>
       </header>
 
       {auth === "view" ? (
@@ -601,12 +624,12 @@ export function Editor({
           </Link>
         </div>
       ) : null}
-      {render.status === "error" && !hideRenderError ? (
+      {render.error && !hideRenderError ? (
         <ErrorBanner
           title="Export failed"
           message={render.error ?? "The renderer stopped unexpectedly."}
           details={render.errorDetails}
-          onRetry={readOnly ? undefined : renderNew}
+          onRetry={readOnly ? undefined : () => renderNew()}
           onDismiss={() => setHideRenderError(true)}
         />
       ) : null}
@@ -616,7 +639,7 @@ export function Editor({
         <div className="flex min-h-0 flex-1">
           {/* Library (wide screens): media bin and text cards, CapCut-style on the left. */}
           {mode === "wide" ? (
-            <aside className="flex w-[300px] shrink-0 flex-col border-r border-white/[0.06] bg-[#111216]">
+            <aside className="flex w-[300px] shrink-0 flex-col border-r border-white/[0.06] bg-surface">
               <Tabs
                 value={libraryTab}
                 onChange={setLibraryTab}
@@ -631,7 +654,7 @@ export function Editor({
 
           {/* Stage */}
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="flex min-h-[160px] flex-1 items-center justify-center bg-[radial-gradient(ellipse_at_center,#16181d_0%,#0c0d10_70%)] p-3 sm:p-6">
+            <div className="flex min-h-[160px] flex-1 items-center justify-center bg-[radial-gradient(ellipse_at_center,var(--color-raised)_0%,var(--color-well)_70%)] p-3 sm:p-6">
               <div className="relative h-full max-h-full w-full" style={{ maxWidth: portrait ? 420 : undefined }}>
                 {/* A size container, so the frame can "contain" itself in any stage shape (cq units below). */}
                 <div className="absolute inset-0 flex items-center justify-center" style={{ containerType: "size" }}>
@@ -660,7 +683,7 @@ export function Editor({
             </div>
 
             {/* Transport */}
-            <div className="flex h-12 shrink-0 items-center gap-3 border-t border-white/[0.06] bg-[#111216] px-3 sm:px-4">
+            <div className="flex h-12 shrink-0 items-center gap-3 border-t border-white/[0.06] bg-surface px-3 sm:px-4">
               <button onClick={() => player.current?.toggle()} aria-label={playing ? "Pause" : "Play"} className="grid size-9 shrink-0 place-items-center rounded-full bg-white text-ink transition hover:scale-105">
                 {playing ? <Pause className="size-4" /> : <Play className="ml-0.5 size-4" />}
               </button>
@@ -687,7 +710,7 @@ export function Editor({
 
           {/* Inspector (wide) or tabbed side panel (tablet) */}
           {mode !== "narrow" ? (
-            <aside className="flex w-[320px] shrink-0 flex-col border-l border-white/[0.06] bg-[#111216] xl:w-[340px]">
+            <aside className="flex w-[320px] shrink-0 flex-col border-l border-white/[0.06] bg-surface xl:w-[340px]">
               {mode === "mid" ? <Tabs value={panelTab} onChange={setPanelTab} tabs={panelTabs} /> : null}
               <div className="min-h-0 flex-1 overflow-y-auto">{mode === "wide" || panelTab === "edit" ? inspector : panelTab === "media" ? mediaBin : textPanel}</div>
             </aside>
@@ -695,7 +718,7 @@ export function Editor({
         </div>
 
         {/* Timeline */}
-        <div className={`${mode === "narrow" ? "h-[160px]" : "h-[196px]"} shrink-0 border-t border-white/[0.06] bg-[#111216]`}>
+        <div className={`${mode === "narrow" ? "h-[160px]" : "h-[196px]"} shrink-0 border-t border-white/[0.06] bg-surface`}>
           <Timeline
             plan={plan}
             assetBase={assetBase}
@@ -719,7 +742,7 @@ export function Editor({
 
         {/* Phone: the panels become a bottom sheet under the timeline. */}
         {mode === "narrow" ? (
-          <div className="flex h-[38dvh] min-h-[220px] shrink-0 flex-col border-t border-white/[0.08] bg-[#111216]">
+          <div className="flex h-[38dvh] min-h-[220px] shrink-0 flex-col border-t border-white/[0.08] bg-surface">
             <Tabs value={panelTab} onChange={setPanelTab} tabs={panelTabs} />
             <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">{panelTab === "edit" ? inspector : panelTab === "media" ? mediaBin : textPanel}</div>
           </div>

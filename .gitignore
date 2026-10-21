@@ -10,3 +10,5 @@ out/
 next-env.d.ts
 tsconfig.tsbuildinfo
 guide/
+
+*.secret.txt

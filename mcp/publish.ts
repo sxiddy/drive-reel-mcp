@@ -15,7 +15,7 @@ export type PublishMeta = {
   source?: string;
 };
 
-export type Published = { id: string; url: string; editUrl: string };
+export type Published = { id: string; url: string; editUrl: string; editKey?: string };
 
 export const siteUrl = () => (process.env.SITE_URL ?? "http://localhost:3000").replace(/\/$/, "");
 
@@ -102,5 +102,5 @@ export async function publishVideo(opts: {
   }
   if (!res.ok) throw new Error(`Website rejected the upload (${res.status}): ${(await res.text()).slice(0, 300)}`);
   const j = (await res.json()) as { id: string; editKey?: string };
-  return { id: j.id, url: `${siteUrl()}/v/${j.id}`, editUrl: `${siteUrl()}/v/${j.id}/edit${j.editKey ? `?key=${j.editKey}` : ""}` };
+  return { id: j.id, url: `${siteUrl()}/v/${j.id}`, editUrl: `${siteUrl()}/v/${j.id}/edit${j.editKey ? `?key=${j.editKey}` : ""}`, editKey: j.editKey };
 }

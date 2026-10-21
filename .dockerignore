@@ -5,3 +5,5 @@ work
 data
 .env
 *.log
+
+*.secret.txt

@@ -18,7 +18,8 @@ const EXTRA_TYPES: Record<string, string> = { ".aac": "audio/aac", ".ogg": "audi
  * dots/spaces (which Windows strips, so "meta.json." would open meta.json).
  */
 const SEGMENT = /^[A-Za-z0-9_][\w\-. ]*$/;
-const segmentOk = (s: string) => SEGMENT.test(s) && !/[. ]$/.test(s) && !s.includes("..");
+const RENDER_FILE = /^v\d{1,4}(?:-(?:720p|4k))?\.mp4$|^v\d{1,4}(?:-og)?\.jpg$/;
+const segmentOk =(s: string) => SEGMENT.test(s) && !/[. ]$/.test(s) && !s.includes("..");
 
 /** Serves a video's files with HTTP range support (needed for seeking in <video> and the editor's player). */
 export async function GET(req: Request, ctx: { params: Promise<{ path: string[] }> }) {
@@ -26,6 +27,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ path: string[] 
   if (!id || !isVideoId(id) || rest.length === 0 || !rest.every(segmentOk)) return new Response("not found", { status: 404 });
   const ext = path.extname(rest[rest.length - 1]).toLowerCase();
   if (!SERVABLE.has(ext)) return new Response("not found", { status: 404 });
+  // renders/ only serves finished outputs by their exact names: vN.mp4/.jpg, the 720p and 4K files and the
+  // link-preview image. Temp files (".v1-720p.mp4.123.part", loudness passes) and anything else are refused.
+  if (rest[0] === "renders" && (rest.length !== 2 || !RENDER_FILE.test(rest[1]))) return new Response("not found", { status: 404 });
   let file: string;
   try {
     file = safeJoin(videoDir(id), rest.join("/"));

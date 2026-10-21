@@ -20,6 +20,28 @@ const SceneBase = z.object({
   caption: z.string().max(140).optional(),
 });
 
+/**
+ * Per-shot colour correction that pulls footage from different phones toward the folder's typical colour,
+ * applied before the style's own look. In order, on display (gamma-encoded) RGB in 0..1:
+ *   white balance  c' = gain[c] · c          (cast removal; gains ≥ 1 so whites stay white)
+ *   exposure       c' = c'^gamma             (< 1 lifts the midtones, > 1 lowers them; black and white stay put)
+ *   saturation     c' = Y + saturation·(c' − Y)   (Y = Rec.709 luma)
+ */
+export const Grade = z.object({
+  gain: z.tuple([z.number().min(0.5).max(1.5), z.number().min(0.5).max(1.5), z.number().min(0.5).max(1.5)]),
+  gamma: z.number().min(0.5).max(2),
+  saturation: z.number().min(0.5).max(1.5),
+});
+export type Grade = z.infer<typeof Grade>;
+
+/** [start, end] seconds in the scene's SOURCE clip (not scene time), so they stay right when the shot is re-trimmed. */
+export const SpeechWindow = z.tuple([z.number().min(0), z.number().min(0)]);
+export type SpeechWindow = z.infer<typeof SpeechWindow>;
+
+/** One subtitle, timed in seconds of the scene's SOURCE clip. */
+export const CaptionCue = z.object({ start: z.number().min(0), end: z.number().min(0), text: z.string().min(1).max(200) });
+export type CaptionCue = z.infer<typeof CaptionCue>;
+
 export const VideoScene = SceneBase.extend({
   kind: z.literal("video"),
   src: z.string(),
@@ -32,6 +54,14 @@ export const VideoScene = SceneBase.extend({
   /** Source frame size; when its shape differs from the video's, the clip sits on a blurred fill instead of being cropped. */
   srcWidth: z.number().positive().optional(),
   srcHeight: z.number().positive().optional(),
+  grade: Grade.optional(),
+  /**
+   * Where someone talks in the source clip (near this shot). The clip's own audio is lifted there and the
+   * music ducked under it; volume 0 keeps the shot muted.
+   */
+  speech: z.array(SpeechWindow).max(300).optional(),
+  /** Subtitles for what is said, timed against the source clip. */
+  captions: z.array(CaptionCue).max(500).optional(),
 });
 
 export const ImageScene = SceneBase.extend({
@@ -39,6 +69,7 @@ export const ImageScene = SceneBase.extend({
   src: z.string(),
   /** Ken Burns direction. */
   motion: z.enum(["zoomIn", "zoomOut", "panLeft", "panRight"]).default("zoomIn"),
+  grade: Grade.optional(),
 });
 
 export const CARD_ICONS = ["book", "clock", "chart", "users", "spark", "check", "calendar", "chat", "bolt", "star", "target", "bulb", "search", "shield", "rocket", "heart"] as const;

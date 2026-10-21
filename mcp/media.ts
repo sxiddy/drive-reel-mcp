@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
 
@@ -112,12 +113,42 @@ export async function audioEnergy(file: string): Promise<number[]> {
   return [...stderr.matchAll(/RMS_level=(-?[\d.]+|-inf)/g)].map((m) => (m[1] === "-inf" ? -90 : Math.max(-90, Number(m[1]))));
 }
 
-export type FrameStat = { t: number; score: number; luma: number; edges: number };
+/**
+ * One sampled frame. luma/lumaLo/lumaHi/u/v/sat are raw 8-bit limited-range values as signalstats reports
+ * them (Y 16–235, chroma centred on 128); `colorOf` turns them into display terms.
+ */
+export type FrameStat = { t: number; score: number; luma: number; edges: number; lumaLo: number; lumaHi: number; u: number; v: number; sat: number };
+
+/** Signalstats keys read from the first (colour) print of each frame. */
+const COLOR_KEYS = { YAVG: "luma", YLOW: "lumaLo", YHIGH: "lumaHi", UAVG: "u", VAVG: "v", SATAVG: "sat" } as const;
+
+/** Parses `metadata=print` output from frameStats/imageColor. The edge map's YAVG is the second print of a frame. */
+export function parseFrameStats(stderr: string): FrameStat[] {
+  const byTime = new Map<string, FrameStat & { seen: number }>();
+  let cur: (FrameStat & { seen: number }) | undefined;
+  for (const line of stderr.split(/\r?\n/)) {
+    const t = line.match(/pts_time:([\d.]+)/);
+    if (t) {
+      cur = byTime.get(t[1]);
+      if (!cur) byTime.set(t[1], (cur = { t: Number(t[1]), score: 0, luma: 128, edges: 0, lumaLo: 128, lumaHi: 128, u: 128, v: 128, sat: 0, seen: 0 }));
+      cur.seen++;
+      continue;
+    }
+    const kv = cur && line.match(/lavfi\.(scene_score|signalstats\.(YAVG|YLOW|YHIGH|UAVG|VAVG|SATAVG))=([\d.]+)/);
+    if (!cur || !kv) continue;
+    const value = Number(kv[3]);
+    if (kv[1] === "scene_score") cur.score = value;
+    else if (cur.seen === 1) cur[COLOR_KEYS[kv[2] as keyof typeof COLOR_KEYS]] = value;
+    else if (kv[2] === "YAVG") cur.edges = value;
+  }
+  return [...byTime.values()].map(({ seen: _seen, ...rest }) => rest).sort((x, y) => x.t - y.t);
+}
 
 /**
- * One pass, 4 samples a second: scene-change score (0 = static, 1 = hard cut), average brightness
- * (0–255) and edge density (how much fine detail survives; motion blur and shaky pans drop it),
- * so the planner can avoid dark or smeared moments.
+ * One pass, 4 samples a second: scene-change score (0 = static, 1 = hard cut), brightness and colour
+ * (signalstats already measures chroma and saturation, so the colour match costs nothing extra) and edge
+ * density (how much fine detail survives; motion blur and shaky pans drop it), so the planner can avoid
+ * dark or smeared moments and match colour between clips.
  */
 export async function frameStats(file: string): Promise<FrameStat[]> {
   const { stderr } = await ffmpeg([
@@ -127,24 +158,222 @@ export async function frameStats(file: string): Promise<FrameStat[]> {
       "format=gray,edgedetect=low=0.08:high=0.2,signalstats,metadata=print:key=lavfi.signalstats.YAVG",
     "-f", "null", "-",
   ]);
-  // Each frame is printed twice: first scene score + brightness, then the edge map's average.
-  const byTime = new Map<string, FrameStat & { seen: number }>();
-  let cur: (FrameStat & { seen: number }) | undefined;
-  for (const line of stderr.split(/\r?\n/)) {
-    const t = line.match(/pts_time:([\d.]+)/);
-    if (t) {
-      cur = byTime.get(t[1]);
-      if (!cur) byTime.set(t[1], (cur = { t: Number(t[1]), score: 0, luma: 128, edges: 0, seen: 0 }));
-      cur.seen++;
-      continue;
-    }
-    const kv = cur && line.match(/lavfi\.(scene_score|signalstats\.YAVG)=([\d.]+)/);
-    if (!cur || !kv) continue;
-    if (kv[1] === "scene_score") cur.score = Number(kv[2]);
-    else if (cur.seen === 1) cur.luma = Number(kv[2]);
-    else cur.edges = Number(kv[2]);
+  return parseFrameStats(stderr);
+}
+
+/**
+ * Average colour in display terms. luma: 0 = black, 1 = white (mean of the picture). u/v: mean chroma
+ * offset, 0 = neutral (+u = bluer, −u = yellower, +v = redder/magenta, −v = greener/cyan); a non-zero
+ * mean over a whole shot is mostly white-balance cast. sat: mean chroma magnitude (0 = grey, ~0.1 = vivid).
+ */
+export type ColorStat = { luma: number; u: number; v: number; sat: number };
+
+const round3 = (x: number) => Math.round(x * 1000) / 1000;
+
+/** Display-terms colour of one frame sample (limited-range 8-bit in). */
+export function colorOfFrame(s: Pick<FrameStat, "luma" | "u" | "v" | "sat">): ColorStat {
+  return { luma: Math.max(0, Math.min(1, (s.luma - 16) / 219)), u: (s.u - 128) / 224, v: (s.v - 128) / 224, sat: s.sat / 224 };
+}
+
+const median = (xs: number[]) => {
+  if (!xs.length) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+/**
+ * Representative colour of a set of samples: the per-channel median, ignoring frames that are almost black
+ * (fades, lens covered), whose chroma is noise. Falls back to all frames when every frame is dark.
+ */
+export function colorOf(samples: ColorStat[]): ColorStat {
+  const lit = samples.filter((c) => c.luma > 0.06);
+  const use = lit.length ? lit : samples;
+  const pick = (k: keyof ColorStat) => round3(median(use.map((c) => c[k])));
+  return { luma: pick("luma"), u: pick("u"), v: pick("v"), sat: pick("sat") };
+}
+
+/** Colour of a still. JPEG decodes full-range; `format=yuv420p` converts it to limited range so photos and clips compare directly. */
+export async function imageColor(file: string): Promise<ColorStat> {
+  const { stderr } = await ffmpeg(["-i", file, "-vf", "scale=640:-2,format=yuv420p,signalstats,metadata=print", "-frames:v", "1", "-f", "null", "-"]);
+  const [s] = parseFrameStats(stderr);
+  if (!s) throw new Error("no colour stats for image");
+  return colorOf([colorOfFrame(s)]);
+}
+
+/** Mono float PCM of a file's audio, at `rate` Hz. */
+export async function decodeMono(file: string, rate: number): Promise<Float32Array> {
+  const raw = path.join(os.tmpdir(), `pcm-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.f32`);
+  try {
+    await ffmpeg(["-i", file, "-vn", "-ac", "1", "-ar", String(rate), "-f", "f32le", raw]);
+    const buf = fs.readFileSync(raw);
+    // Copy out of the Buffer's pool so the array is 4-byte aligned whatever the Buffer's offset.
+    return new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + Math.floor(buf.byteLength / 4) * 4));
+  } finally {
+    fs.rmSync(raw, { force: true });
   }
-  return [...byTime.values()].map(({ seen: _seen, ...rest }) => rest).sort((x, y) => x.t - y.t);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Speech detection
+// ---------------------------------------------------------------------------------------------------------
+
+export const SPEECH_RATE = 16000;
+/** Analysis frame: 20 ms, about one pitch period of the lowest voices times a few. */
+const SPEECH_HOP_S = 0.02;
+
+type Biquad = { b0: number; b1: number; b2: number; a1: number; a2: number };
+
+/** RBJ audio-EQ-cookbook 2nd-order Butterworth high/low-pass. */
+function butter(kind: "high" | "low", f0: number, rate: number): Biquad {
+  const w = (2 * Math.PI * f0) / rate;
+  const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+  const c = Math.cos(w);
+  const a0 = 1 + alpha;
+  const b1 = kind === "low" ? 1 - c : -(1 + c);
+  const b0 = kind === "low" ? (1 - c) / 2 : (1 + c) / 2;
+  return { b0: b0 / a0, b1: b1 / a0, b2: b0 / a0, a1: (-2 * c) / a0, a2: (1 - alpha) / a0 };
+}
+
+function filter(x: Float32Array, f: Biquad): Float32Array {
+  const y = new Float32Array(x.length);
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const v = f.b0 * x[i] + f.b1 * x1 + f.b2 * x2 - f.a1 * y1 - f.a2 * y2;
+    x2 = x1; x1 = x[i]; y2 = y1; y1 = v;
+    y[i] = v;
+  }
+  return y;
+}
+
+const percentile = (sorted: number[], p: number) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(p * (sorted.length - 1))))];
+
+/**
+ * Tuning for detectSpeech. Exported so tests and callers can see what "speech" means here.
+ * - voiceRatioDb: the 300–3400 Hz telephone band must carry at least this share of the energy
+ *   (−7 dB ≈ 20%); wind rumble, traffic and hiss fail it.
+ * - aboveFloorDb: the voice band must be this far above the clip's own noise floor (its 10th percentile).
+ * - minLevelDb: and above this absolute level (dBFS), so a silent clip's floor noise never counts.
+ * - syllableRangeDb: speech switches on and off 3–6 times a second, so within ±0.5 s its voice-band level
+ *   spans a wide range (90th − 10th percentile); sustained music, engines and crowd roar are much steadier.
+ */
+export const SPEECH_TUNING = {
+  voiceRatioDb: -7,
+  aboveFloorDb: 10,
+  minLevelDb: -52,
+  syllableRangeDb: 11,
+  /**
+   * Voiced speech is periodic at the speaker's pitch (70–400 Hz) below ~900 Hz: normalised autocorrelation
+   * of that band must reach this. Bird song, hiss and clatter are aperiodic or pitched far higher.
+   */
+  periodicity: 0.5,
+  /** Share of frames within ±0.25 s that must be voiced (consonants and short gaps are not). */
+  vote: 0.4,
+  minSegment: 0.4,
+  bridgeGap: 0.3,
+  pad: 0.08,
+};
+
+/**
+ * Peak normalised autocorrelation of x[start, start+len) over lags [minLag, maxLag]: ~1 for a clean pitched
+ * sound with its period in range, ~0 for noise.
+ */
+function periodicityAt(x: Float32Array, start: number, len: number, minLag: number, maxLag: number) {
+  if (start < 0 || start + len + maxLag + 1 > x.length) return 0;
+  let best = 0;
+  let e0 = 0;
+  for (let k = start; k < start + len; k++) e0 += x[k] * x[k];
+  if (e0 <= 1e-12) return 0;
+  // Energy of the lagged window, slid along instead of recomputed.
+  let el = 0;
+  for (let k = start + minLag; k < start + minLag + len; k++) el += x[k] * x[k];
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let c = 0;
+    for (let k = start; k < start + len; k++) c += x[k] * x[k + lag];
+    const r = c / Math.sqrt(e0 * el + 1e-20);
+    if (r > best) best = r;
+    el += x[start + lag + len] * x[start + lag + len] - x[start + lag] * x[start + lag];
+  }
+  return best;
+}
+
+/**
+ * Where someone is talking, as [start, end] seconds. A frame is voice-like when the telephone band is loud
+ * against the floor and dominates the spectrum; a moment is speech when most frames within ±0.25 s are
+ * voice-like and the level has the deep syllabic dips speech has and music doesn't. Segments closer than
+ * 0.3 s are bridged into one phrase (the pauses between words), blips under 0.4 s are dropped and the
+ * result is padded a little, since soft onsets and word endings sit under the threshold.
+ */
+export function detectSpeech(samples: Float32Array, rate = SPEECH_RATE, tuning = SPEECH_TUNING): [number, number][] {
+  const hop = Math.max(1, Math.round(rate * SPEECH_HOP_S));
+  const n = Math.floor(samples.length / hop);
+  if (n < 10) return [];
+  const full = filter(samples, butter("high", 60, rate));
+  let voice = filter(filter(samples, butter("high", 300, rate)), butter("high", 300, rate));
+  voice = filter(filter(voice, butter("low", 3400, rate)), butter("low", 3400, rate));
+  const ev: number[] = new Array(n);
+  const ef: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    let sv = 0;
+    let sf = 0;
+    for (let k = i * hop; k < (i + 1) * hop; k++) {
+      sv += voice[k] * voice[k];
+      sf += full[k] * full[k];
+    }
+    ev[i] = 10 * Math.log10(sv / hop + 1e-12);
+    ef[i] = 10 * Math.log10(sf / hop + 1e-12);
+  }
+  const floor = percentile([...ev].sort((a, b) => a - b), 0.1);
+  // Pitch band: low-passed, then decimated to ~8 kHz so the autocorrelation stays cheap.
+  const dec = Math.max(1, Math.floor(rate / 8000));
+  const low = filter(filter(full, butter("low", 900, rate)), butter("low", 900, rate));
+  const pitch = new Float32Array(Math.floor(low.length / dec)).map((_, k) => low[k * dec]);
+  const pr = rate / dec;
+  const pLen = Math.round(pr * 0.04);
+  const [minLag, maxLag] = [Math.floor(pr / 400), Math.ceil(pr / 70)];
+  const voiced = ev.map((e, i) => {
+    if (!(e > Math.max(floor + tuning.aboveFloorDb, tuning.minLevelDb) && e - ef[i] > tuning.voiceRatioDb)) return false;
+    const centre = Math.round(((i + 0.5) * hop) / dec);
+    return periodicityAt(pitch, centre - (pLen >> 1), pLen, minLag, maxLag) >= tuning.periodicity;
+  });
+
+  const halfSyll = Math.round(0.5 / SPEECH_HOP_S);
+  const halfVote = Math.round(0.25 / SPEECH_HOP_S);
+  // Prefix sums for the ±0.25 s vote.
+  const pre = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) pre[i + 1] = pre[i] + (voiced[i] ? 1 : 0);
+  const speech = new Array<boolean>(n).fill(false);
+  for (let i = 0; i < n; i++) {
+    const a = Math.max(0, i - halfVote);
+    const b = Math.min(n, i + halfVote + 1);
+    if ((pre[b] - pre[a]) / (b - a) < tuning.vote) continue;
+    const win = ev.slice(Math.max(0, i - halfSyll), Math.min(n, i + halfSyll + 1)).sort((x, y) => x - y);
+    speech[i] = percentile(win, 0.9) - percentile(win, 0.1) >= tuning.syllableRangeDb;
+  }
+
+  const raw: [number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    if (!speech[i]) continue;
+    let j = i;
+    while (j + 1 < n && speech[j + 1]) j++;
+    raw.push([i * SPEECH_HOP_S, (j + 1) * SPEECH_HOP_S]);
+    i = j;
+  }
+  const merged: [number, number][] = [];
+  for (const seg of raw) {
+    const last = merged[merged.length - 1];
+    if (last && seg[0] - last[1] < tuning.bridgeGap) last[1] = seg[1];
+    else merged.push([...seg]);
+  }
+  const total = samples.length / rate;
+  return merged
+    .filter(([a, b]) => b - a >= tuning.minSegment)
+    .map(([a, b]) => [round3(Math.max(0, a - tuning.pad)), round3(Math.min(total, b + tuning.pad))] as [number, number]);
+}
+
+/** Speech windows of a media file's audio track. */
+export async function speechWindows(file: string): Promise<[number, number][]> {
+  return detectSpeech(await decodeMono(file, SPEECH_RATE), SPEECH_RATE);
 }
 
 /** One image with `cols × rows` frames sampled evenly across the clip, so Claude can see what's in it. */

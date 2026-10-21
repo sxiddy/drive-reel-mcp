@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { EditPlan, isSafeAssetPath, planDurationInFrames, resolveAsset, timelineSegments, transitionFrames } from "../shared/plan";
+import { EditPlan, isSafeAssetPath, planDurationInFrames, resolveAsset, timelineSegments, transitionFrames, type VideoScene } from "../shared/plan";
 import { parseEmbeddedFolderView, parseSource, mediaKind } from "../mcp/drive";
 import { spreadPick } from "../mcp/analyze";
 import { buildPlan, cutTimes, type Theme } from "../mcp/planner";
@@ -12,6 +12,10 @@ import { musicFor, occasionProfile } from "../shared/occasions";
 import { parseRange } from "../render/static-server";
 import { demoPlan } from "../remotion/demo-plan";
 import type { Analysis, ClipInfo } from "../mcp/analyze";
+import { detectSpeech } from "../mcp/media";
+import { chopOf, folderColor, gradeToward } from "../mcp/planner";
+import { isTranscriberAvailable, toCaptionCues } from "../mcp/transcribe";
+import { musicDuck, sceneVolume, speechTimeline, SPEECH_VOLUME } from "../remotion/audio";
 
 test("plan duration subtracts transition overlaps", () => {
   // intro 3s + 3 cards × 3s + outro 2.5s = 14.5s = 435 frames; 4 wipes × 15 frames overlap.
@@ -165,6 +169,184 @@ test("asset paths must stay relative and inside the video folder", () => {
   for (const bad of ["http://example.com/x.mp3", "file:///etc/passwd", "../meta.json", "assets/../../x", "/etc/passwd", "C:/x.mp4", "data:audio/wav;base64,AA"]) {
     assert.ok(!isSafeAssetPath(bad), bad);
   }
+});
+
+// ----- Speech -----------------------------------------------------------------------------------------
+
+const SR = 16000;
+function synthSpeechScene() {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const len = (s: number) => Math.round(s * SR);
+  const resonate = (x: Float32Array, f: number, bw: number) => {
+    const r = Math.exp((-Math.PI * bw) / SR);
+    const c = 2 * r * Math.cos((2 * Math.PI * f) / SR);
+    const y = new Float32Array(x.length);
+    for (let i = 0, y1 = 0, y2 = 0; i < x.length; i++) [y2, y1] = [y1, (y[i] = x[i] + c * y1 - r * r * y2)];
+    return y;
+  };
+  // A voice: glottal pulses at a gliding pitch through three formants, switched on and off at syllable rate.
+  const syllables = (s: number, f0: number) => {
+    const src = new Float32Array(len(s));
+    for (let i = 0, ph = 0; i < src.length; i++) if ((ph += (f0 * (1 + 0.15 * Math.sin((2 * Math.PI * 1.3 * i) / SR))) / SR) >= 1) [ph, src[i]] = [ph - 1, 1];
+    const [a, b, c] = [resonate(src, 700, 90), resonate(src, 1200, 110), resonate(src, 2500, 160)];
+    return a.map((v, i) => {
+      const t = (i / SR) % 0.25;
+      return t < 0.17 ? (v + 0.6 * b[i] + 0.25 * c[i]) * Math.sin((Math.PI * t) / 0.17) : 0;
+    });
+  };
+  const tone = (s: number, fn: (t: number) => number) => new Float32Array(len(s)).map((_, i) => fn(i / SR));
+  const noise = (s: number) => new Float32Array(len(s)).map(() => rnd() * 2 - 1);
+  const level = (x: Float32Array, rms: number) => {
+    const k = rms / Math.sqrt(x.reduce((n, v) => n + v * v, 0) / x.length + 1e-20);
+    return x.map((v) => v * k);
+  };
+  const parts = [
+    level(resonate(noise(1.5), 80, 60), 0.05), // wind rumble        0.0–1.5
+    level(syllables(2, 130), 0.1), // low voice                      1.5–3.5
+    new Float32Array(len(1.2)), // pause                             3.5–4.7
+    level(syllables(1.5, 210), 0.08), // higher voice                4.7–6.2
+    level(tone(2, (t) => [220, 277, 330, 440].reduce((n, f) => n + Math.sin(2 * Math.PI * f * t), 0) * (0.8 + 0.2 * Math.sin(4 * Math.PI * t))), 0.1), // sustained chord 6.2–8.2
+    level(tone(2, (t) => { const u = t % 0.2; return u < 0.08 ? Math.sin(2 * Math.PI * (3000 + 8000 * u) * u) * Math.sin((Math.PI * u) / 0.08) : 0; }), 0.1), // bird chirps 8.2–10.2
+    level(noise(1.5), 0.05), // hiss                                 10.2–11.7
+    new Float32Array(len(1)),
+  ];
+  const out = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) [out.set(p, at), (at += p.length)];
+  const bed = level(noise(out.length / SR), 0.003);
+  return out.map((v, i) => v + bed[i]);
+}
+
+test("speech detection finds the voices and ignores rumble, music, birdsong and hiss", () => {
+  const found = detectSpeech(synthSpeechScene(), SR);
+  assert.equal(found.length, 2, JSON.stringify(found));
+  const expected = [[1.5, 3.5], [4.7, 6.2]];
+  found.forEach(([a, b], i) => {
+    assert.ok(Math.abs(a - expected[i][0]) < 0.2 && Math.abs(b - expected[i][1]) < 0.2, `segment ${i}: ${a}–${b}`);
+  });
+  assert.deepEqual(detectSpeech(new Float32Array(SR * 3), SR), [], "silence");
+});
+
+/** A talking-head clip: 2.6 s phrases with 0.5 s pauses, all the way through. */
+function talkingClip(id: string, duration: number): ClipInfo {
+  const speech: [number, number][] = [];
+  for (let t = 0.2; t + 2.6 < duration; t += 3.1) speech.push([Math.round(t * 100) / 100, Math.round((t + 2.6) * 100) / 100]);
+  return { ...fakeClip(id, duration), speech };
+}
+
+for (const styleId of ["hype", "cinematic", "clean"] as const) {
+  test(`planner cuts between sentences, keeping length and beat sync (${styleId})`, () => {
+    const talky: Analysis = { ...analysis, clips: [talkingClip("v1", 40), talkingClip("v2", 30), talkingClip("v3", 50)], photos: [] };
+    const theme: Theme = {
+      id: "t1", name: "T", pitch: "a test pitch", story: "opens wide, peaks, closes", occasionFit: "fits a test event", styleId, title: "T", outroText: "Bye",
+      // Claude's chosen starts land mid-phrase on purpose.
+      shots: [{ id: "v1", start: 1.2 }, { id: "v3", start: 7.5 }, { id: "v2" }],
+    };
+    const deaf: Analysis = { ...talky, clips: talky.clips.map((c) => ({ ...c, speech: undefined })) };
+    const clipOf = (src: string) => talky.clips.find((c) => c.proxy === src)!;
+    const chops = (plan: EditPlan) => plan.scenes.flatMap((s) => (s.kind === "video" ? [chopOf(clipOf(s.src), s.trimStart, s.duration)] : []));
+    const before = chops(buildPlan(deaf, theme).plan);
+    const { plan } = buildPlan(talky, theme);
+    const after = chops(plan);
+    assert.ok(before.some((c) => c > 0.2), "the speech-blind plan should cut into phrases (else this test proves nothing)");
+    const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+    const shown = `${before.map((c) => c.toFixed(2))} -> ${after.map((c) => c.toFixed(2))}`;
+    if (styleId === "hype") {
+      // 1.6 s shots can't open and close in pauses of nonstop 2.6 s phrases; the planner can only cut nearer the edges.
+      assert.ok(sum(after) < sum(before) * 0.6, `chopped speech ${shown}`);
+    } else {
+      assert.ok(sum(after) < sum(before) * 0.25, `chopped speech ${shown}`);
+      // Phrase windows carry ~0.08 s of padding at each end, so a cut within 0.3 s of a phrase edge is at a word boundary.
+      assert.ok(after.filter((c) => c > 0.3).length <= 1, `at most one shot may still cut into a sentence: ${shown}`);
+    }
+    // The guarantees the planner already made still hold.
+    assert.ok(Math.abs(planDurationInFrames(plan) / plan.fps - 30) < 1);
+    const beat = 60 / plan.music!.bpm;
+    for (const c of cutTimes(plan, timelineSegments(plan), (a, b) => transitionFrames(plan, a, b)).slice(0, -1)) {
+      assert.ok(Math.abs(c / beat - Math.round(c / beat)) * beat <= 1.01 / plan.fps, `cut at ${c.toFixed(3)}s is off the beat`);
+    }
+    for (const s of plan.scenes) {
+      if (s.kind !== "video") continue;
+      assert.ok(s.trimStart >= 0 && s.trimStart + s.duration <= s.sourceDuration + 0.01);
+      assert.ok(s.speech?.length, `${s.id} carries its speech windows`);
+    }
+  });
+}
+
+test("speech lifts the clip's audio and ducks the music by 10 dB with short ramps", () => {
+  const plan = EditPlan.parse({
+    ...demoPlan,
+    transition: { type: "none", duration: 0 },
+    intro: { duration: 0 },
+    scenes: [{ id: "s1", kind: "video", src: "assets/v1.mp4", trimStart: 10, sourceDuration: 60, duration: 4, volume: 0.1, speech: [[11, 12], [30, 31]] }],
+  });
+  const spans = speechTimeline(plan);
+  assert.deepEqual(spans, [[30, 60]], "only the window inside the shot, in timeline frames");
+  assert.ok(Math.abs(musicDuck(45, spans, 30) - 10 ** (-10 / 20)) < 1e-9);
+  assert.equal(musicDuck(10, spans, 30), 1);
+  const mid = musicDuck(27.75, spans, 30);
+  assert.ok(mid < 1 && mid > 10 ** (-10 / 20), "ramps rather than steps");
+  const scene = plan.scenes[0] as VideoScene;
+  assert.equal(sceneVolume(scene, 45, 120, 30), SPEECH_VOLUME);
+  assert.equal(sceneVolume(scene, 100, 120, 30), 0.1);
+  assert.equal(sceneVolume({ ...scene, volume: 0 }, 45, 120, 30), 0, "a muted shot stays muted");
+  assert.deepEqual(speechTimeline({ ...plan, scenes: [{ ...scene, volume: 0 }] }), [], "and doesn't duck the music");
+});
+
+// ----- Colour -----------------------------------------------------------------------------------------
+
+/** Mean colour after a grade, applied the way the renderer's SVG filter does (on the shot's mean RGB). */
+function applyGrade(c: { luma: number; u: number; v: number }, g: ReturnType<typeof gradeToward>) {
+  if (!g) return c;
+  const rgb = [c.luma + 1.5748 * c.v, c.luma - 0.1873 * c.u - 0.4681 * c.v, c.luma + 1.8556 * c.u].map((x, i) => Math.min(1, Math.max(0, g.gain[i] * x)) ** g.gamma);
+  const y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+  const out = rgb.map((x) => y + g.saturation * (x - y));
+  return { luma: y, u: (out[2] - y) / 1.8556, v: (out[0] - y) / 1.5748 };
+}
+
+test("colour grades pull clips toward the folder median, within limits", () => {
+  const colours = [
+    { luma: 0.22, u: 0.03, v: -0.02, sat: 0.03 }, // dim, blue phone
+    { luma: 0.45, u: -0.01, v: 0.01, sat: 0.05 },
+    { luma: 0.5, u: -0.03, v: 0.03, sat: 0.07 }, // warm, punchy phone
+    { luma: 0.42, u: 0.0, v: 0.0, sat: 0.045 },
+  ];
+  const a = { clips: colours.map((color, i) => ({ ...fakeClip(`v${i + 1}`, 10), color })), photos: [] };
+  const target = folderColor(a)!;
+  const spread = (xs: number[]) => Math.max(...xs) - Math.min(...xs);
+  const graded = colours.map((c) => ({ c, g: gradeToward(c, target) }));
+  const after = graded.map(({ c, g }) => applyGrade(c, g));
+  assert.ok(spread(after.map((c) => c.luma)) < spread(colours.map((c) => c.luma)) * 0.6, "luma spread shrinks");
+  assert.ok(spread(after.map((c) => c.u)) < spread(colours.map((c) => c.u)) * 0.75, "blue/yellow cast spread shrinks");
+  for (const { g } of graded) {
+    if (!g) continue;
+    assert.ok(Math.min(...g.gain) === 1 && Math.max(...g.gain) <= 1.1, "white balance never dims a channel or pushes past 10%");
+    assert.ok(g.gamma >= 0.75 && g.gamma <= 1.2 && g.saturation >= 0.8 && g.saturation <= 1.25);
+  }
+  assert.ok(graded[0].g!.gamma < 1, "the dim clip is lifted");
+  assert.equal(gradeToward(target, target), undefined, "a clip that already matches is left alone");
+});
+
+// ----- Captions ---------------------------------------------------------------------------------------
+
+test("no transcriber is set up yet, and raw segments become readable cues", () => {
+  assert.equal(isTranscriberAvailable(), false);
+  const long = "so this is the main stage where everything happens and in about an hour the finalists will walk out to present what they built over the weekend";
+  const cues = toCaptionCues([{ start: 5, end: 13, text: `  ${long} ` }, { start: 13.2, end: 13.4, text: "wow" }, { start: 14, end: 15, text: "   " }]);
+  assert.ok(cues.length >= 3);
+  for (const c of cues) assert.ok(c.text.length <= 84 && c.end > c.start && c.end - c.start <= 6.01, JSON.stringify(c));
+  for (let i = 1; i < cues.length; i++) assert.ok(cues[i].start >= cues[i - 1].end, "no overlaps");
+  assert.equal(cues.map((c) => c.text).join(" "), `${long} wow`);
+  assert.ok(cues[cues.length - 1].end - cues[cues.length - 1].start >= 0.8, "short cues are held long enough to read");
+});
+
+test("plans with and without the new optional fields both parse", () => {
+  EditPlan.parse(demoPlan);
+  const s = { id: "s1", kind: "video", src: "assets/v1.mp4", trimStart: 0, sourceDuration: 9, duration: 3, grade: { gain: [1.05, 1, 1], gamma: 0.9, saturation: 1.1 }, speech: [[0.5, 2]], captions: [{ start: 0.5, end: 2, text: "Hello" }] };
+  const p = EditPlan.parse({ ...demoPlan, scenes: [s] });
+  assert.deepEqual((p.scenes[0] as VideoScene).captions, s.captions);
+  assert.throws(() => EditPlan.parse({ ...demoPlan, scenes: [{ ...s, grade: { gain: [3, 1, 1], gamma: 1, saturation: 1 } }] }));
 });
 
 test("the occasion picks a profile that steers styles and music", () => {

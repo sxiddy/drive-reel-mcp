@@ -1,32 +1,174 @@
 @import "tailwindcss";
 
+/* It's a Wrap. Two rooms: a paper production office and a warm-black screening room.
+   Not `@theme inline`: utilities must read vars at runtime so rooms and the edit bay can re-scope them. */
 @theme {
-  --color-ink: #0b0c0f;
-  --color-panel: #13151a;
-  --color-line: #23262e;
-  --color-muted: #8b90a0;
-  --color-brand: #f5c451;
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
-  --font-display: var(--font-serif), ui-serif, Georgia, serif;
+  --color-canvas: #F1EEE7;  --color-well: #E8E4DB;  --color-surface: #FAF8F4;  --color-raised: #FFFFFF;
+  --color-line: #D5CFC3;    --color-edge: #857E71;
+  --color-fg: #17150F;      --color-fg-2: #4A463E;  --color-fg-3: #6B665C;
+  --color-tally: #E2441B;   --color-tally-ink: #B83310;
+  --color-tally-fill: #B83310; --color-tally-hover: #A32D0D; --color-tally-press: #8F270B; --color-on-tally: #FFFFFF;
+  --color-primary: #17150F; --color-primary-hover: #2E2B24; --color-primary-press: #000000; --color-on-primary: #F1EEE7;
+  --color-ok: #1D6B45;  --color-warn: #8A5300;  --color-err: #B4203A;
+  --color-select: #F2E25A;
+  /* legacy names the editor and older pages use: kept, re-pointed */
+  --color-ink: #F1EEE7; --color-panel: #FAF8F4; --color-muted: #6B665C; --color-brand: #E2441B;
+
+  --font-sans: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-newsreader), ui-serif, Georgia, serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SFMono-Regular", monospace;
+
+  --text-hero: clamp(4rem, 10.5vw, 8rem);     --text-hero--line-height: .86;  --text-hero--letter-spacing: -.005em;
+  --text-d1: clamp(2.75rem, 6vw, 4.5rem);     --text-d1--line-height: .92;    --text-d1--letter-spacing: 0;
+  --text-d2: clamp(1.875rem, 3.2vw, 2.5rem);  --text-d2--line-height: 1;      --text-d2--letter-spacing: .005em;
+  --text-title: 1.375rem;  --text-title--line-height: 1.15; --text-title--letter-spacing: -.01em;
+  --text-lede: clamp(1.125rem, 1.6vw, 1.25rem); --text-lede--line-height: 1.45;
+  --text-prose: 1.0625rem; --text-prose--line-height: 1.55;
+  --text-body: 1rem;       --text-body--line-height: 1.5;
+  --text-small: .875rem;   --text-small--line-height: 1.45;
+  --text-caption: .8125rem;--text-caption--line-height: 1.4;
+  --text-label: .6875rem;  --text-label--line-height: 1.3; --text-label--letter-spacing: .08em;
+  --text-tc: .8125rem;     --text-tc--line-height: 1.4;
+  --text-tc-xl: clamp(2.25rem, 4vw, 3.5rem); --text-tc-xl--line-height: 1;
+
+  --radius-xs: 2px; --radius-sm: 2px; --radius-md: 2px; --radius-lg: 3px; --radius-xl: 4px; --radius-2xl: 4px; --radius-3xl: 4px;
+
+  --ease-out: cubic-bezier(.22, 1, .36, 1);      /* arrivals */
+  --ease-in: cubic-bezier(.64, 0, .78, 0);       /* exits, the clapstick falling */
+  --ease-in-out: cubic-bezier(.83, 0, .17, 1);   /* wipes, lights down */
 }
 
-html,
-body {
-  background: var(--color-ink);
-  color: #eef0f4;
+/* Motion is timed in frames at 24 fps. */
+:root { --f1: 42ms; --f2: 83ms; --f3: 125ms; --f5: 208ms; --f8: 333ms; --f12: 500ms; --f18: 750ms;
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.05'/%3E%3C/svg%3E");
 }
 
-::selection {
-  background: var(--color-brand);
-  color: #111;
+@layer base {
+  /* Dark room: watch + edit always; office pages too when the OS prefers dark. Legacy aliases are
+     re-declared because a var() alias resolves where it's declared, not where it's used. */
+  [data-room="dark"] {
+    --color-canvas: #0F0E0C; --color-well: #0A0908; --color-surface: #181713; --color-raised: #211F1A;
+    --color-line: #2C2A24;   --color-edge: #736D62;
+    --color-fg: #EDE9E0;     --color-fg-2: #ABA598; --color-fg-3: #8F897D;
+    --color-tally: #FF5B2E;  --color-tally-ink: #FF7A52;
+    --color-tally-fill: #FF5B2E; --color-tally-hover: #FF7650; --color-tally-press: #E5491F; --color-on-tally: #0F0E0C;
+    --color-primary: #EDE9E0; --color-primary-hover: #FFFFFF; --color-primary-press: #D8D3C8; --color-on-primary: #0F0E0C;
+    --color-ok: #5FC48E; --color-warn: #E3A43A; --color-err: #FF6B7F; --color-select: #5C4E12;
+    --color-ink: #0F0E0C; --color-panel: #181713; --color-muted: #8F897D; --color-brand: #FF5B2E;
+    --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.07'/%3E%3C/svg%3E");
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    [data-room="office"] {
+      --color-canvas: #0F0E0C; --color-well: #0A0908; --color-surface: #181713; --color-raised: #211F1A;
+      --color-line: #2C2A24;   --color-edge: #736D62;
+      --color-fg: #EDE9E0;     --color-fg-2: #ABA598; --color-fg-3: #8F897D;
+      --color-tally: #FF5B2E;  --color-tally-ink: #FF7A52;
+      --color-tally-fill: #FF5B2E; --color-tally-hover: #FF7650; --color-tally-press: #E5491F; --color-on-tally: #0F0E0C;
+      --color-primary: #EDE9E0; --color-primary-hover: #FFFFFF; --color-primary-press: #D8D3C8; --color-on-primary: #0F0E0C;
+      --color-ok: #5FC48E; --color-warn: #E3A43A; --color-err: #FF6B7F; --color-select: #5C4E12;
+      --color-ink: #0F0E0C; --color-panel: #181713; --color-muted: #8F897D; --color-brand: #FF5B2E;
+      color-scheme: dark;
+    }
+  }
+
+  html, body { background-color: var(--color-canvas); color: var(--color-fg); }
+  [data-room] { min-height: 100dvh; display: flex; flex-direction: column; background-color: var(--color-canvas); background-image: var(--grain); color: var(--color-fg); }
+  html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  ::selection { background: var(--color-select); color: var(--color-fg); }
+  :focus-visible { outline: 2px solid var(--color-tally); outline-offset: 2px; }
+  .tnum, .font-mono { font-variant-numeric: tabular-nums slashed-zero; }
+  .display { font-family: var(--font-display); font-stretch: 62%; font-weight: 800; text-transform: uppercase; }
 }
+
+/* Lights-down: register the room colours so they can interpolate. */
+@property --color-canvas  { syntax: "<color>"; inherits: true; initial-value: #F1EEE7; }
+@property --color-surface { syntax: "<color>"; inherits: true; initial-value: #FAF8F4; }
+@property --color-fg      { syntax: "<color>"; inherits: true; initial-value: #17150F; }
+@property --color-fg-2    { syntax: "<color>"; inherits: true; initial-value: #4A463E; }
+@property --color-line    { syntax: "<color>"; inherits: true; initial-value: #D5CFC3; }
+[data-room].lights { transition: --color-canvas var(--f18) var(--ease-in-out), --color-surface var(--f18) var(--ease-in-out),
+  --color-fg var(--f18) var(--ease-in-out), --color-fg-2 var(--f18) var(--ease-in-out), --color-line var(--f18) var(--ease-in-out); }
+
+/* ---- Textures: each used in exactly one place ---- */
+.slate-stripes { background: repeating-linear-gradient(-60deg, var(--color-fg) 0 4px, var(--color-canvas) 4px 8px); }
+.clapstick { background: repeating-linear-gradient(-60deg, var(--color-fg) 0 12px, var(--color-canvas) 12px 24px); }
+.sprockets {
+  --hole: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='10'%3E%3Crect x='4' y='2' width='8' height='6' rx='1.5' fill='%23F1EEE7' fill-opacity='.85'/%3E%3C/svg%3E");
+  background-color: var(--color-fg); background-image: var(--hole), var(--hole);
+  background-repeat: repeat-x; background-position: 0 2px, 0 calc(100% - 2px); padding: 14px 0;
+}
+.hatch { background: repeating-linear-gradient(45deg, var(--color-line) 0 1px, transparent 1px 8px), var(--color-well); }
+.ruler {
+  height: 24px;
+  background: repeating-linear-gradient(90deg, var(--color-line) 0 1px, transparent 1px 10px) 0 100%/100% 6px no-repeat,
+    repeating-linear-gradient(90deg, var(--color-edge) 0 1px, transparent 1px 50px) 0 100%/100% 12px no-repeat;
+}
+.ruler-v {
+  width: 24px;
+  background: repeating-linear-gradient(180deg, var(--color-line) 0 1px, transparent 1px 10px) 0 0/6px 100% no-repeat,
+    repeating-linear-gradient(180deg, var(--color-edge) 0 1px, transparent 1px 50px) 0 0/12px 100% no-repeat;
+}
+.popover { box-shadow: 0 1px 0 var(--color-line), 0 12px 32px -16px rgb(0 0 0 / .35); }
+
+/* ---- Motion moments (CSS) ---- */
+@keyframes gate { from { transform: translateY(105%); } to { transform: none; } }
+@keyframes hairline { from { transform: scaleX(0); } to { transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes develop { from { filter: brightness(2.4) contrast(.4) saturate(0); } to { filter: none; } }
+@keyframes bar-in { from { transform: scaleY(0); } to { transform: none; } }
+@keyframes blink { 0%, 49.9% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes highlight {
+  0% { background-size: 0% 40%; } 40% { background-size: 100% 40%; opacity: 1; } 100% { background-size: 100% 40%; background-color: transparent; }
+}
+.gate { display: block; overflow: hidden; padding-bottom: .04em; }
+.gate > span { display: block; animation: gate var(--f8) var(--ease-out) both; }
+.hairline-in { transform-origin: left; animation: hairline var(--f12) var(--ease-out) var(--f3) both; }
+.fade-in { animation: fade-in var(--f5) var(--ease-out) both; }
+.rise { animation: rise var(--f5) var(--ease-out) both; }
+.develop { animation: develop var(--f18) var(--ease-out) both; }
+.bar-in { transform-origin: bottom; animation: bar-in var(--f5) var(--ease-out) both; }
+.blink { animation: blink 2s steps(1) infinite; }
+.sweep {
+  background-image: linear-gradient(var(--color-select), var(--color-select));
+  background-repeat: no-repeat; background-position: 0 100%;
+  animation: sweep-in var(--f8) var(--ease-out) both, sweep-out var(--f12) linear var(--f8) forwards;
+}
+@keyframes sweep-in { from { background-size: 0% 40%; } to { background-size: 100% 40%; } }
+@keyframes sweep-out { to { background-size: 100% 0%; } }
+@keyframes clap { from { transform: rotate(-14deg); } to { transform: rotate(0); } }
+@keyframes jolt { from { transform: translateY(2px); } to { transform: none; } }
+
+/* Theme rows: the hover is colour and weight only, no lift. */
+.treatment { position: relative; }
+.treatment::before { content: ""; position: absolute; inset: 0 0 auto; height: 1px; background: var(--color-line); transition: height var(--f2), background-color var(--f2); }
+.treatment:hover::before, .treatment:focus-within::before { height: 2px; background: var(--color-fg); }
+.treatment img { filter: saturate(.8); transition: filter var(--f2); }
+.treatment:hover img { filter: saturate(1); }
+.treatment:hover .pitch-no { color: var(--color-tally-ink); }
+.treatment .arrow { transition: transform var(--f2); }
+.treatment:hover .arrow { transform: translateX(4px); }
+@keyframes wipe { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
+.wipe { animation: wipe var(--f8) var(--ease-in-out) both; }
+
+/* Edit bay: re-themed through tokens only. */
+[data-room="dark"], .edit-bay {
+  --color-white: #EDE9E0; --color-black: #0A0908;
+  --color-red-100: #FFD9DE; --color-red-200: #FFB3BE; --color-red-300: #FF6B7F; --color-red-400: #FF6B7F; --color-red-500: #E5485E;
+  --color-emerald-200: #BDEBD2; --color-emerald-400: #5FC48E; --color-emerald-500: #3FA872;
+  --color-amber-400: #E3A43A; --color-sky-100: #ABA598; --color-sky-400: #ABA598;
+}
+.edit-bay .font-display { font-stretch: 75%; font-weight: 700; text-transform: uppercase; letter-spacing: .005em; }
+.edit-bay .tabular-nums { font-family: var(--font-mono); }
 
 /* Slim editor-style sliders: filled track up to the thumb. */
 .slider {
   appearance: none;
   height: 4px;
   border-radius: 999px;
-  background: linear-gradient(to right, var(--color-brand) var(--pct, 50%), rgb(255 255 255 / 0.12) var(--pct, 50%));
+  background: linear-gradient(to right, var(--color-brand) var(--pct, 50%), rgb(237 233 224 / 0.14) var(--pct, 50%));
   cursor: pointer;
 }
 .slider::-webkit-slider-thumb {
@@ -34,29 +176,19 @@ body {
   width: 14px;
   height: 14px;
   border-radius: 999px;
-  background: #fff;
+  background: var(--color-fg);
   box-shadow: 0 0 0 3px rgb(0 0 0 / 0.35);
-  transition: transform 0.12s;
+  transition: transform var(--f2);
 }
-.slider:hover::-webkit-slider-thumb {
-  transform: scale(1.15);
-}
-.slider::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border: 0;
-  border-radius: 999px;
-  background: #fff;
-}
-input[type="range"]:not(.slider) {
-  accent-color: var(--color-brand);
-}
+.slider:hover::-webkit-slider-thumb { transform: scale(1.15); }
+.slider::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 999px; background: var(--color-fg); }
+input[type="range"]:not(.slider) { accent-color: var(--color-brand); }
 
-.timeline-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: rgb(255 255 255 / 0.18) transparent;
-}
+.timeline-scroll { scrollbar-width: thin; scrollbar-color: rgb(237 233 224 / 0.18) transparent; }
+[data-room="dark"] select { color-scheme: dark; }
 
-select {
-  color-scheme: dark;
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
+  ::view-transition-group(*), ::view-transition-old(*), ::view-transition-new(*) { animation: none !important; }
+  .blink { animation: none !important; }
 }

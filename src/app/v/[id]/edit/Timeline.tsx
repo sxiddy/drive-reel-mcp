@@ -163,7 +163,7 @@ export function Timeline({
             {blocks.slice(1).map((b) =>
               b.transitionIn > 0 ? (
                 <div key={`t${b.key}`} className="pointer-events-none absolute top-1/2 z-20 -translate-x-1/2 -translate-y-1/2" style={{ left: 16 + x(b.start + b.transitionIn / 2) - 1 }}>
-                  <div className="size-3 rotate-45 rounded-[2px] border border-white/50 bg-[#1b1d23]" />
+                  <div className="size-3 rotate-45 rounded-[2px] border border-white/50 bg-raised" />
                 </div>
               ) : null,
             )}
