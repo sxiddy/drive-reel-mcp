@@ -37,6 +37,7 @@ export function CreateForm() {
   // An uploaded song means "our own song"; without one the library is used (a song in the folder still counts).
   const [song, setSong] = useState<{ id: string; name: string; url: string; duration?: number; bpm?: number } | null>(null);
   const [songBusy, setSongBusy] = useState(false);
+  const [matchSong, setMatchSong] = useState(false);
   const [dragging, setDragging] = useState(false);
 
   function removeSong() {
@@ -84,7 +85,7 @@ export function CreateForm() {
       const res = await fetch("/api/make", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ link: link.trim(), duration, occasion: occasion.trim(), eventName: eventName.trim() || undefined, place: place.trim() || undefined, music: song ? "own" : "library", songId: song?.id, auto }),
+        body: JSON.stringify({ link: link.trim(), duration, occasion: occasion.trim(), eventName: eventName.trim() || undefined, place: place.trim() || undefined, music: song ? "own" : "library", songId: song?.id, matchSong: song ? matchSong : undefined, auto }),
       });
       const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.error ?? `Something went wrong (${res.status}).`);
@@ -290,6 +291,13 @@ export function CreateForm() {
                   ×
                 </button>
               </div>
+            ) : null}
+            {song ? (
+              <label className="mt-2 flex items-center gap-2 text-small text-fg-2">
+                <input type="checkbox" checked={matchSong} onChange={(e) => setMatchSong(e.target.checked)} />
+                Match the song: make the video as long as the song, so it ends where the song ends
+                {song.duration ? ` (${Math.floor(song.duration / 60)}:${String(Math.round(song.duration % 60)).padStart(2, "0")})` : ""}
+              </label>
             ) : (
               <div
                 onDragOver={(e) => {

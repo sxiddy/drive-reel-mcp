@@ -107,10 +107,10 @@ export function MakeProgress({ id }: { id: string }) {
 
   const eta = useEta(s?.step, s?.progress ?? 0);
 
-  async function pick(themeId: string) {
-    setPicking(themeId);
+  async function pick(themeId: string, another = false) {
+    setPicking(another ? "again" : themeId);
     setPickError(null);
-    const res = await fetch(`/api/make/${id}/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ themeId }) }).catch(() => null);
+    const res = await fetch(`/api/make/${id}/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ themeId, another }) }).catch(() => null);
     const j = res ? await res.json().catch(() => ({})) : {};
     if (!res?.ok) setPickError(j.error ?? "Couldn't start the video. Try again.");
     else setS(j);
@@ -543,7 +543,7 @@ function Rendering({ id, s, chosen }: { id: string; s: MakeStatus; chosen?: Make
 type VideoMeta = { title: string; versions: { file: string; poster: string; durationSeconds: number; aspect?: string }[] };
 
 /** Done: the slate claps, the house lights go down, the film plays. Once per job. */
-function Wrap({ id: makeId, s, chosen, line, picking, onPick }: { id: string; s: MakeStatus; chosen?: MakeTheme; line: React.ReactNode; picking: string | null; onPick: (id: string) => void }) {
+function Wrap({ id: makeId, s, chosen, line, picking, onPick }: { id: string; s: MakeStatus; chosen?: MakeTheme; line: React.ReactNode; picking: string | null; onPick: (id: string, another?: boolean) => void }) {
   const videoId = s.result!.videoId;
   const reduce = useReducedMotion();
   const [meta, setMeta] = useState<VideoMeta | null>(null);
@@ -645,6 +645,30 @@ function Wrap({ id: makeId, s, chosen, line, picking, onPick }: { id: string; s:
               <Link href={`/v/${videoId}/edit`} className={btn("secondary", "lg", "rise")} style={{ animationDelay: "var(--f1)" }}>
                 <Scissors size={16} strokeWidth={1.5} aria-hidden /> Open the edit bay
               </Link>
+              {chosen && !s.footageCleared ? (
+                <button onClick={() => onPick(chosen.id, true)} disabled={picking !== null} className={btn("secondary", "lg", "rise")} style={{ animationDelay: "var(--f2)" }}>
+                  {picking === "again" ? (
+                    <>
+                      <Tally /> Rolling…
+                    </>
+                  ) : (
+                    "Make another version"
+                  )}
+                </button>
+              ) : null}
+              {s.previous?.length ? (
+                <p className="rise text-caption text-fg-3">
+                  Earlier takes:{" "}
+                  {s.previous.map((p, i) => (
+                    <span key={p.videoId}>
+                      {i ? ", " : ""}
+                      <Link href={`/v/${p.videoId}`} className="underline hover:text-fg">
+                        Take {i + 1}
+                      </Link>
+                    </span>
+                  ))}
+                </p>
+              ) : null}
               <p className="rise text-caption text-fg-3" style={{ animationDelay: "var(--f2)" }}>
                 Only this browser can edit. Anyone with the link can watch.
               </p>

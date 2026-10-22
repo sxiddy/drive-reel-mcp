@@ -24,6 +24,8 @@ import {
 } from "./media";
 import { detectBeats, detectDrop } from "./beats";
 import { exifTakenAt, timeFromName, timeFromTags } from "./capture";
+import { clipAvailable, clipScore, type ClipScores } from "./clip";
+import { describeImage, visionAvailable, visionFrame, type Vision } from "./vision";
 import { clipFaces, facesAt, sidewaysRotation, type FaceSample } from "./faces";
 import { isTranscriberAvailable, transcribe } from "./transcribe";
 import type { AspectRatio, CaptionCue } from "../shared/plan";
@@ -81,10 +83,14 @@ export type ClipInfo = {
   faces?: FaceSample[];
   /** The clip was filmed sideways and its proxy was turned this many degrees clockwise. */
   rotated?: 90 | 270;
+  /** What the local vision model saw in the middle frame (vision.ts), when it is installed. */
+  vision?: Vision;
+  /** CLIP's scores for the middle frame (clip.ts), when it is available. */
+  look?: ClipScores;
 };
 
 /** luma (0..1) and detail (edge density, same scale as ClipInfo.detail) are measured on the proxy, so dark or blurry photos can be skipped. */
-export type PhotoInfo = { id: string; kind: "image"; name: string; folder: string; width: number; height: number; proxy: string; notes?: string; color?: ColorStat; luma?: number; detail?: number; takenAt?: string; faces?: FaceSample };
+export type PhotoInfo = { id: string; kind: "image"; name: string; folder: string; width: number; height: number; proxy: string; notes?: string; color?: ColorStat; luma?: number; detail?: number; takenAt?: string; faces?: FaceSample; vision?: Vision; look?: ClipScores };
 
 /**
  * Indices of clips that repeat an earlier one: middle frames within 6 bits of each other and the same length
@@ -485,6 +491,41 @@ export async function analyzeSource(opts: {
       skipped.push({ name: photos[i].name, reason: "near-duplicate of another photo" });
       photos.splice(i--, 1);
     } else hashes.push(h);
+  }
+
+  // Local AI on one frame of every shot: CLIP scores them all (fast), then the 7B vision model (if Ollama
+  // is installed) describes as many as fit its time budget, since on a laptop CPU it takes tens of seconds
+  // per frame. Clips go first (they carry the edit).
+  const items = [...clips.map((c) => ({ m: c as ClipInfo | PhotoInfo, at: c.duration / 2 as number | undefined })), ...photos.map((p) => ({ m: p as ClipInfo | PhotoInfo, at: undefined }))];
+  const frames = new Map<string, string>();
+  const frameOf = async (m: ClipInfo | PhotoInfo, at: number | undefined) => {
+    if (!frames.has(m.id)) frames.set(m.id, await visionFrame(path.join(projectDir, m.proxy), path.join(dirs.sheets, "vision", `${m.id}.jpg`), at));
+    return frames.get(m.id)!;
+  };
+  if (items.length && (await clipAvailable())) {
+    for (const [i, { m, at }] of items.entries()) {
+      onProgress(`Scoring shot ${i + 1} of ${items.length} (CLIP)`, 0.95);
+      try {
+        const s = await clipScore(await frameOf(m, at));
+        if (s) m.look = s;
+      } catch (e) {
+        console.error(`CLIP failed for ${m.name}:`, (e as Error).message);
+      }
+    }
+  }
+  if (items.length && (await visionAvailable())) {
+    const budget = Number(process.env.VISION_BUDGET_MIN ?? 25) * 60_000;
+    const t0 = Date.now();
+    for (const [i, { m, at }] of items.entries()) {
+      if (Date.now() - t0 > budget) break;
+      onProgress(`Local AI is looking at shot ${i + 1} of ${items.length}`, 0.95 + (0.01 * i) / items.length);
+      try {
+        const v = await describeImage(await frameOf(m, at));
+        if (v) m.vision = v;
+      } catch (e) {
+        console.error(`vision failed for ${m.name}:`, (e as Error).message);
+      }
+    }
   }
 
   let photoSheetPath: string | undefined;

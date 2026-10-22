@@ -78,10 +78,14 @@ async function renderAndPublish(opts: {
 }
 
 /** Drive route: analysis + chosen theme → plan → soundtrack → render → publish. */
-export async function generateFromTheme(projectId: string, theme: Theme, durationOverride: number | undefined, update: (s: string, p: number) => void) {
+export async function generateFromTheme(projectId: string, theme: Theme, durationOverride: number | undefined, update: (s: string, p: number) => void, variant = 0, matchSong = false) {
   update("Planning the edit", 0.02);
   const analysis = loadAnalysis(projectId);
-  const { plan, musicNeeded, notes } = buildPlan(analysis, theme, { durationOverride });
+  // "Match the song": the video is as long as the visitor's own song, so it ends where the song does.
+  const own = matchSong && theme.music === "drive" ? (analysis.audio.find((a) => a.id === "a0") ?? analysis.audio[0]) : undefined;
+  const length = own ? Math.floor(own.duration * 10) / 10 : durationOverride;
+  const { plan, musicNeeded, notes } = buildPlan(analysis, theme, { durationOverride: length, variant, fullSong: !!own });
+  if (own && own.duration > 300) notes.push("The song is longer than 5 minutes, so the video stops at 5 minutes.");
   const dir = projectDir(projectId);
   if (musicNeeded?.kind === "generated") {
     update("Composing the soundtrack", 0.05);

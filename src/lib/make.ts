@@ -125,7 +125,7 @@ export class MakeError extends Error {
 }
 
 /** Starts analysing a Drive folder. `auto` renders Claude's first theme straight away ("Just make it"). */
-export function startMake(input: { source: string; occasion: string; duration: number; eventName?: string; place?: string; auto: boolean; music?: "library" | "own"; songId?: string }): MakeStatus {
+export function startMake(input: { source: string; occasion: string; duration: number; eventName?: string; place?: string; auto: boolean; music?: "library" | "own"; songId?: string; matchSong?: boolean }): MakeStatus {
   try {
     sweepFootage();
   } catch (e) {
@@ -143,7 +143,7 @@ export function startMake(input: { source: string; occasion: string; duration: n
     id,
     createdAt: now,
     updatedAt: now,
-    input: { source: input.source, occasion: input.occasion, duration: input.duration, ...(input.eventName ? { eventName: input.eventName } : {}), ...(input.place ? { place: input.place } : {}), ...(input.music ? { music: input.music } : {}), ...(input.songId ? { songId: input.songId } : {}) },
+    input: { source: input.source, occasion: input.occasion, duration: input.duration, ...(input.eventName ? { eventName: input.eventName } : {}), ...(input.place ? { place: input.place } : {}), ...(input.music ? { music: input.music } : {}), ...(input.songId ? { songId: input.songId } : {}), ...(input.matchSong ? { matchSong: true } : {}) },
     step: "queued",
     stage: "Starting",
     progress: 0,
@@ -156,15 +156,18 @@ export function startMake(input: { source: string; occasion: string; duration: n
 }
 
 /** Renders the theme the visitor picked. */
-export function startGenerate(id: string, themeId: string): MakeStatus {
+export function startGenerate(id: string, themeId: string, another = false): MakeStatus {
   const s = liveStatus(id);
   if (!s) throw new MakeError("not found", 404);
   if (s.step !== "choose" && s.step !== "done") throw new MakeError(s.step === "rendering" ? "A video is already being made." : "Themes aren't ready yet.", 409);
   if (s.footageCleared) throw new MakeError("This footage was cleared to save space. Start a new video from the same link to try another cut.", 410);
   if (!s.themes?.some((t) => t.id === themeId)) throw new MakeError("Unknown theme.", 400);
   if (busy()) throw new MakeError("Drive Reel is busy making other videos. Try again in a few minutes.", 429);
-  const next: MakeStatus = { ...s, step: "rendering", chosen: themeId, stage: "Starting", progress: 0, error: undefined, result: undefined };
+  // Another version of the same theme: a new take seed, no re-analysis. The old video stays published.
+  const variant = another && s.chosen === themeId ? (s.variant ?? 0) + 1 : 0;
+  const previous = s.result ? [...(s.previous ?? []), s.result].slice(-10) : s.previous;
+  const next: MakeStatus = { ...s, step: "rendering", chosen: themeId, variant, previous, stage: "Starting", progress: 0, error: undefined, result: undefined };
   writeStatus(makeDir(id), next);
-  if (!launch(id, ["generate", id, themeId])) throw new MakeError("Could not start the render.", 500);
+  if (!launch(id, ["generate", id, themeId, String(variant)])) throw new MakeError("Could not start the render.", 500);
   return next;
 }

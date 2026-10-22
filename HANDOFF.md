@@ -8,7 +8,7 @@ Not committed. This is the brief for a new Claude session continuing this projec
 Quality bar: the reference aftermovie (`scratchpad/ref/ref.mp4` from an earlier session; may be gone — re-download only with the owner's OK). Reference traits: 51 cuts in 51 s on a 128 BPM track, cuts at 0.47/0.93 s (beat/half-beat), −14 LUFS loudness, time chips ("Hour 1"…), big event title (VINHACK 2026), group-shot end card, opens on the wide hall shot. Our score: old ~3/10 → now ~6.5/10. Targets: ~7 after queued fixes, ~7.5 with CLIP, ~8–8.5 with Qwen2.5-VL 7B, ~9.5–10 with the full editor controls. Do not regress this — re-render the hackathon test footage and compare against these traits after every pipeline change.
 
 ## 2. Owner's rules (ABSOLUTE)
-- **Usage cap: never exceed 90% of the 5-hour window, in any case.** Stop background agents at ~85%. Before every step call `get_usage` and post "Your limit is now at X% (weekly Y%)". Never estimate — the owner has caught estimates.
+- **Usage cap: never exceed 95% of the 5-hour window (raised from 90% on 2026-10-22), in any case.** Before every step call `get_usage` and post "Your limit is now at X% (weekly Y%)". Never estimate — the owner has caught estimates.
 - **No features that spend the owner's Claude plan or an Anthropic API key.** Don't rely on the MCP/Claude route for quality. Local models only (CLIP, aesthetic scorer, Ollama + **Qwen2.5-VL 7B** — never downgrade to 3B).
 - **No downloading copyrighted songs.** Users bring their own song (upload or in the Drive folder). Built-in library = Kevin MacLeod CC BY 4.0, credited on watch page + end card.
 - **Commit only when asked.** Author: `git -c user.name="Radha" -c user.email="radha@tocumulus.com" commit ...` with trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -45,6 +45,11 @@ Quality bar: the reference aftermovie (`scratchpad/ref/ref.mp4` from an earlier 
 6. Re-render hackathon footage, score vs reference, restart live site, commit when asked.
 7. Lean ultracode review — only when asked.
 8. PDF guide — only when asked.
+
+## 5b. Status at 2026-10-22 ~09:30Z (uncommitted until the owner asks)
+Done, tested (57 tests) and live: feature 4 (Make another version: `variant` seed, `previous` takes), feature 8 (Match the song: `matchSong` → full-song length), sideways check on 800 px frames, every theme opens on the widest venue shot, dark windows drop out of the clean tier, CLIP scoring (mcp/clip.ts, ~0.1 s/frame), 7B wiring (mcp/vision.ts, 25-min budget, skipped when Ollama is absent), editor Look section (chip, framing, brightness/saturation/warmth), end-card date, song start (whole beats), per-cut transitions (`transitionIn`, same length; "none" = hard cut mid-overlap).
+Verified by re-rendering the hackathon project (tests/tmp/rerender.ts): opens on the hall with the title, −14.1 LUFS, no black or frozen frames.
+Left: Ollama 0.40.8 is installed; `qwen2.5vl:7b` was at 5.56 of ~6 GB when this session ended (run `ollama list` to confirm). Next: test `describeImage` (mcp/vision.ts) on one frame, re-run `npx tsx tests/tmp/rerender.ts <outdir>` on the hackathon project (tests/tmp is gitignored; recreate the script from git history notes if missing), compare against the reference, fix what shows up. CLIP is installed (@huggingface/transformers, model cached in node_modules).
 
 ## 6. Token estimate (rate: ~100k tokens ≈ 10% of a 5-hour window)
 | Part | Tokens | 5-hour window | Weekly |

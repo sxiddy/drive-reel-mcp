@@ -130,6 +130,25 @@ function ShotInspector({ plan, scene, index, media, updateScene, move, duplicate
 
       {scene.kind === "card" ? <CardFields scene={scene} index={index} plan={plan} media={media} updateScene={updateScene} /> : null}
 
+      <Section title="Cut into this shot">
+        <Field label="Transition" hint={plan.transition.type === "none" ? "turn on transitions for the video first" : "same length, so the beat grid stays"}>
+          <select
+            className={inputCls}
+            disabled={plan.transition.type === "none"}
+            value={scene.transitionIn ?? ""}
+            onChange={(e) => updateScene(index, { transitionIn: (e.target.value || undefined) as TransitionType | undefined })}
+          >
+            <option value="">Video default ({TRANSITIONS.find((t) => t.id === plan.transition.type)?.label ?? plan.transition.type})</option>
+            {TRANSITIONS.filter((t) => t.id !== "none").map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+            <option value="none">Hard cut</option>
+          </select>
+        </Field>
+      </Section>
+
       <Section title="Caption">
         <Field label="Caption on this shot">
           <input className={inputCls} placeholder="No caption" value={scene.caption ?? ""} maxLength={140} onChange={(e) => updateScene(index, { caption: e.target.value || undefined }, `cap${scene.id}`)} />
@@ -190,6 +209,8 @@ function ShotInspector({ plan, scene, index, media, updateScene, move, duplicate
         ) : null}
       </Section>
 
+      {scene.kind !== "card" ? <LookFields scene={scene} index={index} updateScene={updateScene} /> : null}
+
       {scene.kind === "video" ? (
         <Section title="Sound">
           <Field label="Clip audio" hint={`${Math.round(scene.volume * 100)}%`}>
@@ -198,6 +219,44 @@ function ShotInspector({ plan, scene, index, media, updateScene, move, duplicate
         </Section>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Per-shot look: the time chip, where the frame is cropped to (the focus point), and colour. The colour
+ * sliders edit the shot's grade (which starts as the automatic phone-to-phone colour match).
+ */
+function LookFields({ scene, index, updateScene }: { scene: Extract<Scene, { kind: "video" | "image" }>; index: number; updateScene: InspectorProps["updateScene"] }) {
+  const g = scene.grade ?? { gain: [1, 1, 1] as [number, number, number], gamma: 1, saturation: 1 };
+  const warmth = r2((g.gain[0] - g.gain[2]) / 0.3);
+  const level = (g.gain[0] + g.gain[2]) / 2;
+  const setGrade = (patch: Partial<typeof g>, key: string) => updateScene(index, { grade: { ...g, ...patch } }, `${key}${scene.id}`);
+  const [fx, fy] = scene.focus ?? [0.5, 0.5];
+  return (
+    <Section title="Look">
+      <Field label="Time chip" hint={`${(scene.chip ?? "").length}/16`}>
+        <input className={inputCls} placeholder="None (e.g. 10:49 PM, Hour 24)" value={scene.chip ?? ""} maxLength={16} onChange={(e) => updateScene(index, { chip: e.target.value || undefined }, `chip${scene.id}`)} />
+      </Field>
+      <Field label="Framing, left ↔ right" hint={`${Math.round(fx * 100)}%`}>
+        <Slider label="Crop horizontal position" min={0} max={1} step={0.01} value={fx} onChange={(v) => updateScene(index, { focus: [v, fy] }, `fx${scene.id}`)} />
+      </Field>
+      <Field label="Framing, top ↕ bottom" hint={`${Math.round(fy * 100)}%`}>
+        <Slider label="Crop vertical position" min={0} max={1} step={0.01} value={fy} onChange={(v) => updateScene(index, { focus: [fx, v] }, `fy${scene.id}`)} />
+      </Field>
+      <Field label="Brightness" hint={g.gamma < 1 ? "brighter" : g.gamma > 1 ? "darker" : "as shot"}>
+        {/* gamma below 1 lifts the midtones, so the slider runs from dark (2) to bright (0.5) */}
+        <Slider label="Brightness" min={-1} max={1} step={0.02} value={r2(-Math.log2(g.gamma))} onChange={(v) => setGrade({ gamma: r2(2 ** -v) }, "gam")} />
+      </Field>
+      <Field label="Saturation" hint={`${Math.round(g.saturation * 100)}%`}>
+        <Slider label="Saturation" min={0.5} max={1.5} step={0.01} value={g.saturation} onChange={(v) => setGrade({ saturation: v }, "sat")} />
+      </Field>
+      <Field label="Warmth" hint={warmth > 0 ? "warmer" : warmth < 0 ? "cooler" : "neutral"}>
+        <Slider label="Warmth" min={-1} max={1} step={0.02} value={Math.max(-1, Math.min(1, warmth))} onChange={(v) => setGrade({ gain: [r2(level + 0.15 * v), g.gain[1], r2(level - 0.15 * v)] }, "warm")} />
+      </Field>
+      <button type="button" className="text-xs text-white/60 underline hover:text-white" onClick={() => updateScene(index, { grade: undefined, focus: undefined })}>
+        Reset framing and colour
+      </button>
+    </Section>
   );
 }
 
@@ -348,8 +407,11 @@ function VideoInspector({ plan, edit, setStyle, media, assetBase, uploads, onUse
         <Field label="Title">
           <input className={inputCls} value={plan.title} maxLength={80} onChange={(e) => edit((p) => ({ ...p, title: e.target.value }), "title")} />
         </Field>
-        <Field label="Subtitle">
+        <Field label="Subtitle (place)" hint="also on the end card">
           <input className={inputCls} placeholder="None" value={plan.subtitle ?? ""} maxLength={120} onChange={(e) => edit((p) => ({ ...p, subtitle: e.target.value || undefined }), "subtitle")} />
+        </Field>
+        <Field label="End card date" hint={`${(plan.dateLine ?? "").length}/60`}>
+          <input className={inputCls} placeholder="e.g. 18–19 September 2026" value={plan.dateLine ?? ""} maxLength={60} onChange={(e) => edit((p) => ({ ...p, dateLine: e.target.value || undefined }), "dateline")} />
         </Field>
         <Field label="Closing line">
           <input className={inputCls} value={plan.outro.text} maxLength={80} onChange={(e) => edit((p) => ({ ...p, outro: { ...p.outro, text: e.target.value } }), "outro")} />
@@ -432,6 +494,19 @@ function VideoInspector({ plan, edit, setStyle, media, assetBase, uploads, onUse
           <UploadList uploads={uploads.filter((u) => u.kind === "audio")} />
           <AudioList items={songs} assetBase={assetBase} musicSrc={plan.music?.src ?? null} readOnly={readOnly} onUse={onUseAudio} showNone />
         </div>
+        {plan.music?.duration && plan.music.duration > 4 ? (
+          <Field label="Song starts at" hint={`${Math.floor((plan.music.start ?? 0) / 60)}:${String(Math.floor((plan.music.start ?? 0) % 60)).padStart(2, "0")} of ${Math.floor(plan.music.duration / 60)}:${String(Math.floor(plan.music.duration % 60)).padStart(2, "0")}`}>
+            {/* Whole beats only, so every cut still lands on the beat. */}
+            <Slider
+              label="Song start"
+              min={0}
+              max={Math.max(0, plan.music.duration - 4)}
+              step={60 / plan.music.bpm}
+              value={plan.music.start ?? 0}
+              onChange={(v) => edit((p) => ({ ...p, music: p.music && { ...p.music, start: r2(Math.round(v / (60 / p.music.bpm)) * (60 / p.music.bpm)) || undefined } }), "mstart")}
+            />
+          </Field>
+        ) : null}
         {plan.music ? (
           <Field label="Music volume" hint={`${Math.round(plan.music.volume * 100)}%`}>
             <Slider label="Music volume" min={0} max={1} step={0.01} value={plan.music.volume} onChange={(v) => edit((p) => ({ ...p, music: p.music && { ...p.music, volume: v } }), "music")} />

@@ -23,7 +23,7 @@ if (fs.existsSync(localEnv)) process.loadEnvFile(localEnv);
 
 const args = process.argv.slice(2);
 const auto = args.includes("--auto");
-const [cmd, projectId, themeId] = args.filter((a) => a !== "--auto");
+const [cmd, projectId, themeId, variantArg] = args.filter((a) => a !== "--auto");
 const dir = projectDir(projectId);
 let status = readStatus(dir);
 if (!status) throw new Error(`No status.json for ${projectId}`);
@@ -118,8 +118,9 @@ async function generate(id = themeId) {
   const project = loadProject(projectId);
   const theme = project.themes.find((t) => t.id === id);
   if (!theme) throw new Error(`No theme ${id}`);
-  set({ step: "rendering", chosen: id, stage: "Planning the edit", progress: 0, error: undefined });
-  const r = await generateFromTheme(projectId, theme, undefined, (stage, p) => set({ stage, progress: p }, false));
+  set({ step: "rendering", chosen: id, stage: Number(variantArg) ? "Planning another version" : "Planning the edit", progress: 0, error: undefined });
+  const variant = Number(variantArg) || 0;
+  const r = await generateFromTheme(projectId, theme, undefined, (stage, p) => set({ stage, progress: p }, false), variant, status?.input.matchSong === true);
   if (!r.published) throw new Error(r.publishError ?? "The video rendered but could not be published");
   set({ step: "done", stage: "Ready", progress: 1, result: { videoId: r.published.id, editKey: r.published.editKey, durationSeconds: r.durationSeconds } });
 }

@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.131.0",
+    "@huggingface/transformers": "^3.8.1",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@remotion/bundler": "4.0.537",
     "@remotion/cli": "4.0.537",

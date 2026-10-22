@@ -492,3 +492,22 @@ test("EXIF orientation is read from a JPEG header", () => {
   assert.equal(ORIENT_FILTER[6], "transpose=1");
   assert.equal(exifOrientation(Buffer.from([0xff, 0xd8, 0xff, 0xda, 0, 2])), 1);
 });
+
+test("another version reshuffles the shots, the same way every time, at the same length", () => {
+  const theme: Theme = { id: "t1", name: "T", pitch: "a test pitch", story: "opens wide, peaks, closes", occasionFit: "fits a test event", styleId: "hype", title: "T", outroText: "Bye", shots: [] };
+  const key = (p: EditPlan) => p.scenes.map((s) => (s.kind === "video" ? `${s.src}@${s.trimStart}` : s.id)).join(",");
+  const first = buildPlan(analysis, theme).plan;
+  const v1 = buildPlan(analysis, theme, { variant: 1 }).plan;
+  assert.equal(key(v1), key(buildPlan(analysis, theme, { variant: 1 }).plan), "a variant is deterministic");
+  const others = [1, 2, 3].map((variant) => key(buildPlan(analysis, theme, { variant }).plan));
+  assert.ok(others.some((k) => k !== key(first)), "some variant differs from the first take");
+  assert.ok(Math.abs(planDurationInFrames(v1) / v1.fps - 30) < 1);
+});
+
+test("match the song: the video runs the song's length", () => {
+  const withSong: Analysis = { ...analysis, audio: [{ id: "a0", kind: "audio", name: "song.mp3", duration: 25, proxy: "assets/a0.m4a", bpm: 120, beatOffset: 0, dropAt: 12 }] };
+  const theme: Theme = { id: "t1", name: "T", pitch: "a test pitch", story: "opens wide, peaks, closes", occasionFit: "fits a test event", styleId: "hype", title: "T", outroText: "Bye", music: "drive", shots: [] };
+  const { plan } = buildPlan(withSong, theme, { durationOverride: 25, fullSong: true });
+  const secs = planDurationInFrames(plan) / plan.fps;
+  assert.ok(Math.abs(secs - 25) < 1, `got ${secs}s`);
+});

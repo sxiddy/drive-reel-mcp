@@ -20,6 +20,11 @@ const SceneBase = z.object({
   caption: z.string().max(140).optional(),
   /** Small time-of-day tag shown on the shot, e.g. "10:49 PM" (capture time). */
   chip: z.string().max(16).optional(),
+  /**
+   * How this shot comes in, overriding the video's transition for this one cut. It keeps the same length
+   * so nothing on the timeline moves; "none" is a hard cut halfway through that overlap.
+   */
+  transitionIn: TransitionType.optional(),
 });
 
 /** Point of the source frame to keep in view when it is cropped to fill (0..1, x and y), e.g. the faces' centre. */
@@ -138,6 +143,8 @@ export const EditPlan = z.object({
       credit: z.string().optional(),
       /** Track length in seconds, so a video longer than its track can loop it smoothly. */
       duration: z.number().positive().optional(),
+      /** Seconds into the track where the video's music begins (the editor moves it in whole beats). */
+      start: z.number().min(0).max(600).optional(),
     })
     .nullable(),
   intro: z.object({ duration: z.number().min(0).max(8) }),

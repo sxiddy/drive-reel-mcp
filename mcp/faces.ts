@@ -101,9 +101,15 @@ export function summarize(boxes: Box[], t?: number): FaceSample {
 
 const ROTATE: Record<number, string> = { 0: "", 90: "transpose=1,", 270: "transpose=2," };
 
-/** One frame of a file (seeked to `at` for videos), scaled to SIZE on its long side, optionally rotated. */
-async function frameRgb(file: string, at: number | undefined, rotate: 0 | 90 | 270, tmp: string) {
-  const vf = `${ROTATE[rotate]}scale='if(gt(iw,ih),${SIZE},-2)':'if(gt(iw,ih),-2,${SIZE})'`;
+/**
+ * The sideways check looks at turned frames, where a phone clip's people are small: it gets a larger frame
+ * so their faces are big enough to find. Everything else stays at SIZE (detection is the slow part).
+ */
+const ROTATED_SIZE = 800;
+
+/** One frame of a file (seeked to `at` for videos), scaled to `size` on its long side, optionally rotated. */
+async function frameRgb(file: string, at: number | undefined, rotate: 0 | 90 | 270, tmp: string, size = SIZE) {
+  const vf = `${ROTATE[rotate]}scale='if(gt(iw,ih),${size},-2)':'if(gt(iw,ih),-2,${size})'`;
   const { stderr } = await ffmpeg([...(at !== undefined ? ["-ss", at.toFixed(2)] : []), "-i", file, "-vf", `${vf},showinfo`, "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", tmp], 120_000);
   const m = stderr.match(/s:(\d+)x(\d+)/);
   const buf = fs.readFileSync(tmp);
@@ -111,16 +117,16 @@ async function frameRgb(file: string, at: number | undefined, rotate: 0 | 90 | 2
   let w = m ? Number(m[1]) : 0;
   let h = m ? Number(m[2]) : 0;
   if (!w || w * h * 3 !== buf.length) {
-    // showinfo missing: infer from the byte count assuming the long side is SIZE.
+    // showinfo missing: infer from the byte count assuming the long side is `size`.
     const px = buf.length / 3;
-    const other = Math.round(px / SIZE);
-    [w, h] = other <= SIZE ? (other * SIZE === px ? [SIZE, other] : [other, SIZE]) : [SIZE, other];
+    const other = Math.round(px / size);
+    [w, h] = other <= size ? (other * size === px ? [size, other] : [other, size]) : [size, other];
   }
   return { rgb: new Uint8Array(buf.buffer, buf.byteOffset, buf.length), w, h };
 }
 
-export async function facesAt(file: string, tmp: string, at?: number, rotate: 0 | 90 | 270 = 0): Promise<FaceSample> {
-  const f = await frameRgb(file, at, rotate, tmp);
+export async function facesAt(file: string, tmp: string, at?: number, rotate: 0 | 90 | 270 = 0, size = SIZE): Promise<FaceSample> {
+  const f = await frameRgb(file, at, rotate, tmp, size);
   return summarize(await detectFaces(f.rgb, f.w, f.h), at);
 }
 
@@ -148,7 +154,7 @@ export async function sidewaysRotation(file: string, duration: number, upright: 
     let n = 0;
     let frames = 0;
     for (const t of times) {
-      const s = await facesAt(file, tmp, t, rot);
+      const s = await facesAt(file, tmp, t, rot, ROTATED_SIZE);
       n += s.n;
       if (s.n) frames++;
     }

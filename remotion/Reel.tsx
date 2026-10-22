@@ -21,15 +21,14 @@ import { CardView, MotionIntro, MotionOutro } from "./cards";
 import { AnimatedHeading, BodyText, Caption, Graded, Overlays, Subtitles, makeLook, textShadow, useCorrection, type Look } from "./components";
 import { musicDuck, sceneVolume, speechTimeline } from "./audio";
 import { MotionField } from "./motion";
-import { whip } from "./whip";
+import { hardCut, whip } from "./whip";
 import { BackdropOutro, OpeningTitle, TimeChip, framing } from "./opening";
 
 const SLIDE_DIRS = ["from-right", "from-bottom", "from-left", "from-top"] as const;
 const WIPE_DIRS = ["from-left", "from-top-right", "from-right", "from-bottom-left"] as const;
 
 // TransitionSeries needs a presentation per transition; vary the direction so long reels don't feel repetitive.
-function presentationFor(plan: EditPlan, index: number, width: number, height: number): TransitionPresentation<Record<string, unknown>> {
-  const t = plan.transition.type;
+function presentationFor(plan: EditPlan, index: number, width: number, height: number, t = plan.transition.type): TransitionPresentation<Record<string, unknown>> {
   const p = (() => {
     switch (t) {
       case "slide":
@@ -46,6 +45,8 @@ function presentationFor(plan: EditPlan, index: number, width: number, height: n
         return flip({ direction: SLIDE_DIRS[index % SLIDE_DIRS.length] });
       case "whip":
         return whip({ direction: index % 3 === 2 ? -1 : 1, width });
+      case "none":
+        return hardCut();
       default:
         return fade();
     }
@@ -240,9 +241,11 @@ const Music: React.FC<{ plan: EditPlan; total: number }> = ({ plan, total }) => 
       ? music.volume
       : music.volume * interpolate(globalFrame, [0, fadeIn, total - fadeOut, total], [0, 1, 1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }));
 
-  if (!music.duration) return <Audio src={src} loop volume={envelope} />;
-  const track = Math.floor(music.duration * fps);
-  if (track >= total) return <Audio src={src} volume={envelope} />;
+  // Where in the track the video's music begins; what plays is the rest of the track from there.
+  const skip = Math.round((music.start ?? 0) * fps);
+  if (!music.duration) return <Audio src={src} loop trimBefore={skip} volume={envelope} />;
+  const track = Math.max(fps, Math.floor(music.duration * fps) - skip);
+  if (track >= total) return <Audio src={src} trimBefore={skip} volume={envelope} />;
 
   // Each repeat starts a whole number of beats after the last, so the beat grid (which cards animate to)
   // carries on through the seam; the overlap left over (about 1 s) is the crossfade.
@@ -262,6 +265,7 @@ const Music: React.FC<{ plan: EditPlan; total: number }> = ({ plan, total }) => 
           <Sequence key={k} from={from} durationInFrames={length} layout="none" name={`music-${k + 1}`}>
             <Audio
               src={src}
+              trimBefore={skip}
               volume={(f) => {
                 const gainIn = isFirst ? 1 : Math.sin((Math.min(1, f / xfade) * Math.PI) / 2);
                 const out = isLast ? 1 : Math.cos((Math.max(0, Math.min(1, (f - (track - xfade)) / xfade)) * Math.PI) / 2);
@@ -293,7 +297,7 @@ export const Reel: React.FC<{ plan: EditPlan }> = ({ plan }) => {
       start += segs[i - 1].frames - tf;
       if (tf > 0) {
         items.push(
-          <TransitionSeries.Transition key={`t-${seg.key}`} presentation={presentationFor(plan, i, width, height)} timing={linearTiming({ durationInFrames: tf })} />,
+          <TransitionSeries.Transition key={`t-${seg.key}`} presentation={presentationFor(plan, i, width, height, plan.scenes.find((s) => s.id === seg.key)?.transitionIn)} timing={linearTiming({ durationInFrames: tf })} />,
         );
       }
     }

@@ -33,3 +33,16 @@ const WhipView: React.FC<TransitionPresentationComponentProps<WhipProps>> = ({ c
 export function whip(props: WhipProps): TransitionPresentation<WhipProps> {
   return { component: WhipView, props };
 }
+
+/**
+ * Hard cut inside a transition slot: the outgoing shot holds until halfway, then the incoming one appears.
+ * Used when one cut is set to "none" in the editor, so the timeline (and the beat grid) doesn't move.
+ */
+const CutView: React.FC<TransitionPresentationComponentProps<Record<string, never>>> = ({ children, presentationDirection, presentationProgress }) => {
+  const show = presentationDirection === "entering" ? presentationProgress >= 0.5 : presentationProgress < 0.5;
+  return <AbsoluteFill style={{ opacity: show ? 1 : 0 }}>{children}</AbsoluteFill>;
+};
+
+export function hardCut(): TransitionPresentation<Record<string, never>> {
+  return { component: CutView, props: {} };
+}

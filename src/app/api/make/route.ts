@@ -6,7 +6,7 @@ export const runtime = "nodejs";
 
 /** Starts making a video from a Drive folder: { link, duration, occasion, auto? }. */
 export async function POST(req: Request) {
-  let body: { link?: unknown; duration?: unknown; occasion?: unknown; eventName?: unknown; place?: unknown; auto?: unknown; music?: unknown; songId?: unknown };
+  let body: { link?: unknown; duration?: unknown; occasion?: unknown; eventName?: unknown; place?: unknown; auto?: unknown; music?: unknown; songId?: unknown; matchSong?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   const songId = typeof body.songId === "string" && body.songId ? body.songId : undefined;
   if (songId && !songPath(ROOT, songId)) return Response.json({ error: "That song upload has expired. Upload it again." }, { status: 400 });
   try {
-    const s = startMake({ source: link, occasion, duration: Math.round(duration), eventName, place, auto: body.auto === true, music, ...(music === "own" && songId ? { songId } : {}) });
+    const s = startMake({ source: link, occasion, duration: Math.round(duration), eventName, place, auto: body.auto === true, music, ...(music === "own" && songId ? { songId, matchSong: body.matchSong === true } : {}) });
     return Response.json(publicStatus(s), { status: 201 });
   } catch (e) {
     if (e instanceof MakeError) return Response.json({ error: e.message }, { status: e.status });

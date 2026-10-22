@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import type { Vision } from "./vision";
+import type { ClipScores } from "./clip";
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
@@ -79,6 +81,13 @@ export async function proposeWithClaude(a: Analysis, dir: string): Promise<Propo
  * real footage. Moments are scored exactly as the planner scores them (quality, folder-relative
  * sharpness, stamped files), so a blurred swing, a ceiling or a map-stamped clip is never an anchor.
  */
+/** The local vision model's view (when installed): a shot it calls "wide" makes the best opener, "group" the best closer. */
+const roleBoost = (v: Vision | undefined, role: "wide" | "group", look?: ClipScores) =>
+  (!v ? 1 : v.shot === role ? 1.6 : v.shot === "screen" || v.dark ? 0.5 : 1) * (look ? 0.7 + 0.8 * look[role] : 1);
+const visionGroup = (v: Vision | undefined) => (v?.shot === "group" ? Math.min(10, v.people) * 0.3 : 0);
+/** What the pitch calls a shot: the model's caption, else the file name. */
+const labelOf = (m: { name: string; vision?: Vision }) => (m.vision?.caption ? `"${m.vision.caption}"` : m.name);
+
 export function autoThemes(a: Analysis): Proposal {
   const profile = occasionProfile(a.occasion);
   const styles: StyleId[] = [...new Set([...profile.styles, ...STYLE_IDS.filter((s) => !profile.avoid.includes(s))])].slice(0, 3);
@@ -102,12 +111,12 @@ export function autoThemes(a: Analysis): Proposal {
         const ds = (c.detail ?? []).filter((x) => Number.isFinite(x));
         const detail = ds.length ? ds.reduce((x, y) => x + y, 0) / ds.length : detailRef;
         const establish = establishingScore({ detail, detailRef, faces: face, landscape: c.orientation === "landscape", clean: calm?.clean ?? 0 });
-        return { id: c.id, label: c.name, start: at, calm: calm?.score ?? 0, peak: peak?.score ?? 0, clean, establish, group: groupScore(face, calm?.clean ?? 0) * 0.8, long: c.duration >= 4 };
+        return { id: c.id, label: labelOf(c), start: at, calm: calm?.score ?? 0, peak: peak?.score ?? 0, clean: clean && !c.vision?.dark, establish: establish * roleBoost(c.vision, "wide", c.look), group: (groupScore(face, calm?.clean ?? 0) * 0.8 + visionGroup(c.vision)) * roleBoost(c.vision, "group", c.look), long: c.duration >= 4 };
       }),
       ...a.photos.map((p): Item => {
         const q = photoQuality(p, photoRef);
         const establish = establishingScore({ detail: p.detail ?? photoRef, detailRef: photoRef, faces: p.faces, landscape: p.width > p.height, clean: q }) * 0.8;
-        return { id: p.id, label: p.name, calm: 0.5 * q, peak: 0.2 * q, clean: q >= PHOTO_MIN && !STAMPED.test(p.name), establish, group: groupScore(p.faces, q), long: true };
+        return { id: p.id, label: labelOf(p), calm: 0.5 * q, peak: 0.2 * q, clean: q >= PHOTO_MIN && !STAMPED.test(p.name) && !p.vision?.dark, establish: establish * roleBoost(p.vision, "wide", p.look), group: (groupScore(p.faces, q) + visionGroup(p.vision)) * roleBoost(p.vision, "group", p.look), long: true };
       }),
     ];
     // Only clean material anchors a theme, unless the folder has nothing clean at all.
@@ -116,14 +125,27 @@ export function autoThemes(a: Analysis): Proposal {
     const byPeak = [...pool].sort((x, y) => y.peak - x.peak);
     const pick = (list: Item[], skip: string[]) => list.find((i) => !skip.includes(i.id)) ?? list[0];
     // Story shape: open on the venue (widest sharp establishing shot), peak on the strongest crowd moment,
-    // close on the biggest group shot. Each theme takes the k-th best opener so the arcs still differ.
+    // close on the biggest group shot. The themes differ in style and closer.
     // The strongest moment is kept for the peak, never spent on the opening.
     const top = byPeak[0];
     const byEstablish = [...pool].filter((i) => i.long && (pool.length < 2 || i.id !== top.id)).sort((x, y) => y.establish - x.establish);
-    const opener = byEstablish[k % Math.max(1, Math.min(3, byEstablish.length))] ?? byCalm[k % byCalm.length];
-    const peak = pick(byPeak, [opener.id]);
+    // Every theme opens on the same widest venue shot (the hall), as the reference aftermovie does, peaks
+    // on the strongest moment, and ends on one of the best few group shots (else calm ones). Only a folder
+    // too small to give every theme its own closer moves the later themes to the next-best opener.
     const byGroup = [...pool].sort((x, y) => y.group - x.group);
-    const closer = (byGroup[0]?.group ?? 0) > 0 ? pick(byGroup, [opener.id, peak.id]) : pick([...byCalm.slice((k + 1) % byCalm.length), ...byCalm], [opener.id, peak.id]);
+    const endsFor = (skip: string[]) => ((byGroup[0]?.group ?? 0) > 0 ? byGroup.filter((i) => i.group > 0) : byCalm).filter((i) => !skip.includes(i.id));
+    let opener = byEstablish[0] ?? byCalm[k % byCalm.length];
+    let peak = pick(byPeak, [opener.id]);
+    let ends = endsFor([opener.id, peak.id]);
+    let slot = k;
+    const room = Math.min(3, ends.length);
+    if (k >= room && byEstablish[1]) {
+      opener = byEstablish[1];
+      peak = pick(byPeak, [opener.id]);
+      ends = endsFor([opener.id, peak.id]);
+      slot = k - room;
+    }
+    const closer = ends[slot % Math.max(1, Math.min(3, ends.length))] ?? pick(byCalm, [opener.id, peak.id]);
     const shot = (i: Item) => ({ id: i.id, ...(i.start !== undefined ? { start: i.start } : {}) });
     return {
       name: `${style.name} cut`,

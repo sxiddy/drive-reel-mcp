@@ -50,3 +50,13 @@ test("the website only accepts Drive links and long random job ids", () => {
   assert.ok(!isMakeId("prj-93f0ff"));
   assert.ok(!isMakeId("web-" + "a1".repeat(12) + "/../x"));
 });
+
+test("the local vision model's answers are read safely", async () => {
+  const { parseVision, visionFactor } = await import("../mcp/vision");
+  assert.deepEqual(parseVision('{"shot":"wide","people":3,"dark":false,"appeal":9,"caption":"the hall"}'), { shot: "wide", people: 3, dark: false, appeal: 9, caption: "the hall" });
+  assert.equal(parseVision('{"shot":"spaceship","appeal":99}')!.shot, "other");
+  assert.equal(parseVision('{"appeal":99}')!.appeal, 10);
+  assert.equal(parseVision("not json"), undefined);
+  assert.ok(visionFactor({ shot: "wide", people: 0, dark: true, appeal: 5, caption: "" }) < visionFactor({ shot: "wide", people: 0, dark: false, appeal: 5, caption: "" }));
+  assert.equal(visionFactor(undefined), 1);
+});

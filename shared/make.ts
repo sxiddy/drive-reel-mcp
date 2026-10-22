@@ -37,6 +37,8 @@ export type MakeStatus = {
     music?: "library" | "own";
     /** Song uploaded on the form (work/uploads/<songId>.<ext>). */
     songId?: string;
+    /** The video runs the whole length of the visitor's song and ends on its ending (overrides duration). */
+    matchSong?: boolean;
   };
   step: MakeStep;
   /** What is happening right now, e.g. "Watching clip 3 of 9". */
@@ -55,6 +57,10 @@ export type MakeStatus = {
   auto?: boolean;
   chosen?: string;
   result?: { videoId: string; editKey?: string; durationSeconds: number };
+  /** Which take of the chosen theme this is (0 = the first; "Make another version" counts up). */
+  variant?: number;
+  /** Earlier finished videos of this job, oldest first, so a new take never loses an old one. */
+  previous?: { videoId: string; editKey?: string; durationSeconds: number }[];
   /** The downloaded footage was deleted to save disk; the published video keeps its own copy. */
   footageCleared?: boolean;
 };

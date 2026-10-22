@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { visionFactor } from "./vision";
+import { clipFactor } from "./clip";
 import { AspectRatio, EditPlan, type CaptionCue, type Grade, type Scene } from "../shared/plan";
 import { STYLES, STYLE_IDS, type StyleDef } from "../shared/styles";
 import { musicFor } from "../shared/occasions";
@@ -47,6 +49,12 @@ export type Theme = ThemeInput & { id: string };
 /** clean: quality × sharpness × stamp alone (0..1), without the style's energy/motion preference. */
 type Window = { clip: ClipInfo; start: number; len: number; score: number; clean: number };
 
+/** Deterministic 0..1 from a string (FNV-1a), so a variant renders the same way every time. */
+const seeded = (s: string) => {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return (h >>> 0) / 4294967296;
+};
 const r3 = (x: number) => Math.round(x * 1000) / 1000;
 const clampTo = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 
@@ -216,9 +224,13 @@ export function windowsFor(clip: ClipInfo, len: number, style: StyleDef, detailR
     // Much less detail than the folder's typical shot: a blurred camera swing, a ceiling, a bare wall.
     const sharp = detailRef > 0 && dn ? 0.15 + 0.85 * Math.max(0, Math.min(1, (d / dn / detailRef - 0.25) / 0.35)) : 1;
     const talk = clip.speech?.length ? 1 - Math.min(0.6, 0.6 * chopOf(clip, start, len)) : 1;
-    const clean = (0.25 + 0.75 * q) * sharp * stampFactor(clip.name);
+    // A dark stage or hall (mean brightness under ~20%) reads as a black hole between bright shots: such
+    // windows fall below the clean tier and are used only when nothing else is left.
+    const L = clip.colorTrack?.luma.slice(a, b).filter((x) => Number.isFinite(x));
+    const dim = L?.length ? 0.3 + 0.7 * clampTo((L.reduce((x, y) => x + y, 0) / L.length - 0.1) / 0.1, 0, 1) : 1;
+    const clean = (0.25 + 0.75 * q) * sharp * dim * (clip.vision?.dark ? 0.5 : 1) * stampFactor(clip.name);
     const people = faceFactor(faceAt(clip, start + len / 2));
-    out.push({ clip, start, len, score: (w.e * e + w.m * m + w.s * (1 - m)) * clean * talk * people, clean });
+    out.push({ clip, start, len, score: (w.e * e + w.m * m + w.s * (1 - m)) * clean * talk * people * visionFactor(clip.vision) * clipFactor(clip.look), clean });
   }
   return out;
 }
@@ -358,7 +370,7 @@ const SPEECH_MARGIN = 3;
 /** Extra soundtrack beyond the target, so lengthening the video in the editor doesn't run out of music. */
 const MUSIC_HEADROOM = 20;
 
-export function buildPlan(analysis: Analysis, theme: Theme, opts: { durationOverride?: number; library?: LibraryTrack[] } = {}): BuildResult {
+export function buildPlan(analysis: Analysis, theme: Theme, opts: { durationOverride?: number; library?: LibraryTrack[]; variant?: number; fullSong?: boolean } = {}): BuildResult {
   const style = STYLES[theme.styleId];
   const notes: string[] = [];
   const target = Math.max(8, Math.min(300, opts.durationOverride ?? analysis.targetDuration));
@@ -371,12 +383,13 @@ export function buildPlan(analysis: Analysis, theme: Theme, opts: { durationOver
   const driveTrack = musicMode === "drive" ? (analysis.audio.find((a) => a.id === "a0") ?? [...analysis.audio].sort((a, b) => b.duration - a.duration)[0]) : undefined;
   // Without a Drive song: a royalty-free library track picked for the style (the same one for the same
   // project and theme); the synthesised soundtrack only when the library is empty.
-  const libTrack = musicMode !== "none" && !driveTrack ? pickTrack(theme.styleId, analysis.occasion, target, `${analysis.projectId}|${theme.id}`, opts.library ?? loadLibrary()) : undefined;
+  const libTrack = musicMode !== "none" && !driveTrack ? pickTrack(theme.styleId, analysis.occasion, target, `${analysis.projectId}|${theme.id}${opts.variant ? `|v${opts.variant}` : ""}`, opts.library ?? loadLibrary()) : undefined;
   if (musicMode === "drive" && !driveTrack) notes.push(libTrack ? `No audio file in the folder, so "${libTrack.title}" from the music library was used.` : "No audio file in the folder, so a matching track was generated.");
   const useGenerated = musicMode !== "none" && !driveTrack && !libTrack;
   // The visitor's own song with a detected drop: cut like a library track, so its drop lands on the peak too.
   const ownCut =
-    driveTrack?.bpm && driveTrack.dropAt !== undefined && energetic
+    // "Match the song" plays it from the top to its own ending instead of cutting to the drop.
+    driveTrack?.bpm && driveTrack.dropAt !== undefined && energetic && !opts.fullSong
       ? { path: driveTrack.proxy, bpm: driveTrack.bpm, beatOffset: driveTrack.beatOffset ?? 0, dropAt: driveTrack.dropAt, duration: driveTrack.duration, credit: driveTrack.name }
       : undefined;
   const cutTrack: CutTrack | undefined = libTrack ?? ownCut;
@@ -424,7 +437,7 @@ export function buildPlan(analysis: Analysis, theme: Theme, opts: { durationOver
   const detailRef = detailRefOf(clips);
   const photoRef = photoDetailRef(analysis.photos, detailRef);
   // Dark or blurry photos are dropped; the rest are ranked by quality (stamped files last).
-  const photoRank = (p: PhotoInfo) => photoQuality(p, photoRef) * stampFactor(p.name) * faceFactor(p.faces);
+  const photoRank = (p: PhotoInfo) => photoQuality(p, photoRef) * stampFactor(p.name) * faceFactor(p.faces) * visionFactor(p.vision) * clipFactor(p.look);
   const blurry = analysis.photos.filter((p) => photoQuality(p, photoRef) < PHOTO_MIN);
   if (blurry.length) notes.push(`Left out ${blurry.length} photo${blurry.length === 1 ? "" : "s"} that ${blurry.length === 1 ? "is" : "are"} too dark or blurry.`);
   const photos = analysis.photos.filter((p) => photoQuality(p, photoRef) >= PHOTO_MIN);
@@ -479,9 +492,13 @@ export function buildPlan(analysis: Analysis, theme: Theme, opts: { durationOver
 
   // 2) The best remaining moments, round-robin across clips so the folder is well covered. Clean windows
   //    first; blurred, dark or stamped ones only once everything else (photos included) is used up.
+  // "Make another version": each variant reshuffles near-equal moments (scores × 0.7–1), same footage rules.
+  const jitter = (key: string) => (opts.variant ? 0.7 + 0.3 * seeded(`${key}|${opts.variant}`) : 1);
   const pools = clips
     .map((c) => {
-      const wins = windowsFor(c, seqLen, style, detailRef).sort((a, b) => b.score - a.score);
+      const wins = windowsFor(c, seqLen, style, detailRef)
+        .map((w) => ({ ...w, score: w.score * jitter(`${c.id}@${w.start}`) }))
+        .sort((a, b) => b.score - a.score);
       return { clip: c, clean: wins.filter((w) => w.clean >= CLEAN_MIN), rest: wins.filter((w) => w.clean < CLEAN_MIN) };
     })
     .sort((a, b) => (b.clean[0]?.score ?? 0) - (a.clean[0]?.score ?? 0));
